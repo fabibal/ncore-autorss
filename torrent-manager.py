@@ -156,30 +156,42 @@ def reconcile_state(live_hashes):
     return len(changed)
 
 
-def accumulate_uploaded(torrents, st):
-    """Monotonic cumulative bytes uploaded by the auto-film category, immune to torrent
-    deletion and per-torrent counter resets. qB's per-torrent `uploaded` disappears when
-    a torrent is removed, so summing it live is non-monotonic and would break Prometheus
+def _accumulate(torrents, st, field, seen_key, total_key):
+    """Monotonic cumulative `field` bytes for the auto-film category, immune to torrent
+    deletion and per-torrent counter resets. qB's per-torrent counters disappear when a
+    torrent is removed, so summing them live is non-monotonic and would break Prometheus
     increase() (a drop reads as a counter reset). Instead we bank each torrent's growth
     into a running total and prune departed hashes -- their contribution stays banked, so
-    the exported counter only ever rises. Powers the daily/weekly uploaded-GB panels."""
-    seen = st.setdefault("up_seen", {})
-    total = st.get("uploaded_total", 0)
+    the exported counter only ever rises."""
+    seen = st.setdefault(seen_key, {})
+    total = st.get(total_key, 0)
     present = set()
     for t in torrents:
         h = t.get("hash")
         if not h:
             continue
         present.add(h)
-        cur = t.get("uploaded") or 0
+        cur = t.get(field) or 0
         prev = seen.get(h, 0)
         total += (cur - prev) if cur >= prev else cur  # cur < prev => per-torrent reset
         seen[h] = cur
     for h in list(seen):
         if h not in present:
             seen.pop(h, None)  # departed torrent: growth already banked, stop tracking
-    st["uploaded_total"] = total
+    st[total_key] = total
     return total
+
+
+def accumulate_uploaded(torrents, st):
+    """Monotonic bytes UPLOADED by the category. Powers the daily uploaded-GB stat and
+    the up/down rate graph."""
+    return _accumulate(torrents, st, "uploaded", "up_seen", "uploaded_total")
+
+
+def accumulate_downloaded(torrents, st):
+    """Monotonic bytes DOWNLOADED by the category. Powers the daily downloaded-GB stat
+    and the up/down rate graph."""
+    return _accumulate(torrents, st, "downloaded", "down_seen", "downloaded_total")
 
 
 def compute_metrics(torrents, st):
@@ -197,6 +209,7 @@ def compute_metrics(torrents, st):
         "deleted": st.get("deleted_total", 0),
         "peers_zero": sum(1 for t in torrents if peers(t) == 0),
         "uploaded_total": accumulate_uploaded(torrents, st),
+        "downloaded_total": accumulate_downloaded(torrents, st),
     }
 
 
@@ -218,6 +231,9 @@ def write_metrics(m):
         "# HELP autorss_uploaded_bytes_total Cumulative bytes uploaded by the auto-film category (monotonic)",
         "# TYPE autorss_uploaded_bytes_total counter",
         "autorss_uploaded_bytes_total %d" % m["uploaded_total"],
+        "# HELP autorss_downloaded_bytes_total Cumulative bytes downloaded by the auto-film category (monotonic)",
+        "# TYPE autorss_downloaded_bytes_total counter",
+        "autorss_downloaded_bytes_total %d" % m["downloaded_total"],
         "# HELP autorss_deleted_total Cumulative torrents deleted by the manager",
         "# TYPE autorss_deleted_total counter",
         "autorss_deleted_total %d" % m["deleted"],
@@ -399,8 +415,8 @@ def main():
         write_metrics(m)
         update_films_panel(st, torrents)
         C.save_json(MGR_STATE, st)
-        log.info("run done (%s) | approved=%d rejected=%d active=%d seeding=%d disk=%.1fGB up=%.1fGB deleted=%d zero_peers=%d stalled=%d",
-                 cmd, m["approved"], m["rejected"], m["active"], m["seeding"], m["disk_gb"], m["uploaded_total"] / 1e9, m["deleted"], m["peers_zero"], m["stalled"])
+        log.info("run done (%s) | approved=%d rejected=%d active=%d seeding=%d disk=%.1fGB up=%.1fGB down=%.1fGB deleted=%d zero_peers=%d stalled=%d",
+                 cmd, m["approved"], m["rejected"], m["active"], m["seeding"], m["disk_gb"], m["uploaded_total"] / 1e9, m["downloaded_total"] / 1e9, m["deleted"], m["peers_zero"], m["stalled"])
     else:
         C.save_json(MGR_STATE, st)  # qB unreachable -> preserve metrics + last panel
         log.warning("run done (%s) | qB unreachable -> metrics preserved (not overwritten)", cmd)

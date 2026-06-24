@@ -4,13 +4,24 @@
 Run:  python3 test_autorss.py
 
 Covers:
-  - clean_title() year parsing, incl. the regression for year-titled films.
-  - the shared active-download predicate (incl. the dead-stall case that used to
-    freeze the queue) and that the gate and the metric use the SAME function.
-  - env_value() parsing (.env loader for the passkey / Grafana creds).
-  - films_markdown() rendering + pipe escaping (the Grafana text-panel content).
+  - clean_title() year parsing, quality/separator-variant dedup, future-year guard,
+    and the empty-key fallback.
+  - the shared active-download predicate and that the gate and the metric use the
+    SAME function.
+  - seen_clean / decided status semantics: a quality 'skipped' or space-'removed'
+    film no longer blocks a legitimate variant (findings #2/#10/#11).
+  - flock_or_exit actually HOLDS the lock while the fd is referenced (finding #1).
+  - mutate_state locked read-modify-write -> no lost updates (finding #4).
+  - ensure_space deletes only completed 0-peer seeders, never an in-progress
+    download or a torrent with peers (finding #3).
+  - torrent_size / category_used_bytes use committed size, not partial bytes (#5).
+  - accumulate_uploaded monotonic + deletion-safe upload counter (dashboard panels).
+  - env_value() exact-match preference, qb_add no-auto-stop flags, add-attempt cap.
+  - films_markdown() rendering, seeding-stat columns, and pipe escaping.
 """
+import fcntl
 import importlib.util
+import logging
 import os
 import sys
 import tempfile
@@ -19,6 +30,12 @@ import unittest
 sys.path.insert(0, "/home/fbazsa/ncore-autorss")
 import autorss
 import autorss_common as C
+
+LOG = logging.getLogger("test_autorss")
+LOG.addHandler(logging.NullHandler())
+# keep app loggers quiet during tests (a NullHandler suppresses the last-resort stderr)
+for _n in ("test_autorss", "autorss", "torrent-manager"):
+    logging.getLogger(_n).addHandler(logging.NullHandler())
 
 
 def _load(name, path):
@@ -41,7 +58,7 @@ class TestCleanTitle(unittest.TestCase):
         "Joe.Strummer.A.jovo.nincs.megirva.2007.HUN.1080p.BluRay.x264-PLAN9 [Film (HUN HD)]":
             "Joe Strummer A jovo nincs megirva (2007)",
         "A.lako.1976.Carlotta.HUN.1080p.UHD.BluRay.DV.HDR.HEVC-PLAN9 [Film (HUN HD)]": "A lako (1976)",
-        # regression (bug #2): titles that contain / start with a year-like number
+        # regression: titles that contain / start with a year-like number
         "2012.2009.1080p.BluRay.x264-AMIABLE [Film (ENG HD)]": "2012 (2009)",
         "1917.2019.1080p.BluRay.x264-SPARKS [Film (ENG HD)]": "1917 (2019)",
         "2001.A.Space.Odyssey.1968.REMASTERED.1080p.BluRay [Film (ENG HD)]": "2001 A Space Odyssey (1968)",
@@ -56,6 +73,34 @@ class TestCleanTitle(unittest.TestCase):
     def test_clean_title(self):
         for raw, expected in self.CASES.items():
             self.assertEqual(autorss.clean_title(raw), expected, msg=raw)
+
+
+class TestCleanTitleVariants(unittest.TestCase):
+    """The dedup key must collapse quality/separator variants of ONE film, bound the
+    release year to plausible values, and never return an empty key."""
+
+    def test_quality_variants_collapse_to_one_key(self):
+        a = autorss.clean_title("The.Batman.2022.720p.BluRay.x264-GRP [Film (ENG HD)]")
+        b = autorss.clean_title("The.Batman.2022.1080p.WEB-DL.x265-OTH [Film (ENG HD)]")
+        self.assertEqual(a, b)
+        self.assertEqual(a, "The Batman (2022)")
+
+    def test_mixed_dot_space_separators_collapse(self):
+        a = autorss.clean_title("The.Matrix Reloaded.2003.720p [Film (ENG HD)]")
+        b = autorss.clean_title("The Matrix Reloaded 2003 720p [Film (ENG HD)]")
+        self.assertEqual(a, b)
+        self.assertEqual(a, "The Matrix Reloaded (2003)")
+
+    def test_future_number_not_treated_as_release_year(self):
+        # no real release year present -> 2049 is part of the title, not the year
+        self.assertEqual(autorss.clean_title("Blade.Runner.2049.720p.BluRay [Film (ENG HD)]"),
+                         "Blade Runner 2049")
+
+    def test_empty_key_falls_back_to_raw(self):
+        # title made entirely of quality tokens would clean to '' -> fall back, never empty
+        out = autorss.clean_title("Web.720p.x264 [Film (ENG HD)]")
+        self.assertTrue(out)
+        self.assertEqual(out, "Web.720p.x264")
 
 
 def _t(progress, state, seeds=0, leechs=0, time_active=60):
@@ -78,8 +123,8 @@ class TestActiveDownload(unittest.TestCase):
                         "has a seed -> still active even if old")
 
     def test_gate_and_metric_share_one_function(self):
-        # bug #1 + #4: the queue gate (autorss) and the dashboard metric (torrent-manager)
-        # are now literally the same shared function -- they cannot disagree.
+        # the queue gate (autorss) and the dashboard metric (torrent-manager) are
+        # literally the same shared function -- they cannot disagree.
         self.assertIs(autorss.is_active_download, tm.is_active_download)
         self.assertIs(autorss.is_active_download, C.is_active_download)
 
@@ -108,24 +153,167 @@ class TestRemuxFilter(unittest.TestCase):
             self.assertFalse(R.search(raw), msg=raw)
 
 
-class TestAlreadySeenDedup(unittest.TestCase):
-    def test_same_film_other_torrent_id_is_seen(self):
-        # state already holds one film (under any status); a DIFFERENT torrent ID /
-        # release of the SAME film must be recognised as already seen.
-        films = {
-            "111": {"clean": "Frozen (2013)", "status": "removed"},
-            "222": {"clean": "Dune Part Two (2024)", "status": "rejected"},
-            "333": {"clean": "Michael (2026)", "status": "downloaded"},
-            "444": {"status": "pending"},  # no clean yet -> must not crash / add None
-        }
-        seen = autorss.seen_clean_titles(films)
-        self.assertEqual(seen, {"Frozen (2013)", "Dune Part Two (2024)", "Michael (2026)"})
+class TestSeenAndDecidedStatuses(unittest.TestCase):
+    """Findings #2/#10/#11: a per-release quality 'skipped' or a space-freed 'removed'
+    film must NOT block a legitimate variant; only a real Deepseek verdict
+    (pending/downloaded/rejected) does. Decisions are reused for everything except
+    quality skips (which never asked Deepseek)."""
 
-        # a new torrent for an already-seen film (different name + ID) is deduped
-        new_release = "Frozen.2013.1080p.WEB-DL.x264-OTHER [Film (ENG HD)]"
-        self.assertIn(autorss.clean_title(new_release), seen)
-        # a genuinely new film is not
-        self.assertNotIn(autorss.clean_title("Wicked.2024.1080p.BluRay [Film (ENG HD)]"), seen)
+    FILMS = {
+        "111": {"clean": "Frozen (2013)", "status": "removed", "decision": True, "reason": "hit"},
+        "222": {"clean": "Dune Part Two (2024)", "status": "rejected", "decision": False, "reason": "old"},
+        "333": {"clean": "Michael (2026)", "status": "downloaded", "decision": True, "reason": "hit"},
+        "444": {"clean": "Wicked (2024)", "status": "skipped", "decision": False, "reason": "720p only"},
+        "555": {"clean": "Heretic (2024)", "status": "pending", "decision": True, "reason": "hit"},
+        "666": {"status": "pending"},  # no clean -> must not add None / crash
+    }
+
+    def test_seen_excludes_skipped_and_removed(self):
+        seen = autorss.seen_clean_titles(self.FILMS)
+        self.assertEqual(seen, {"Dune Part Two (2024)", "Michael (2026)", "Heretic (2024)"})
+        # a freed ('removed') film's new release is NOT blocked -> can be re-acquired
+        self.assertNotIn(autorss.clean_title("Frozen.2013.720p.WEB-DL.x264-OTHER [Film (ENG HD)]"), seen)
+        # a quality-'skipped' film's 720p variant is NOT blocked -> gets reconsidered
+        self.assertNotIn(autorss.clean_title("Wicked.2024.720p.BluRay-XX [Film (ENG HD)]"), seen)
+        # a rejected/downloaded film's other release IS blocked
+        self.assertIn(autorss.clean_title("Dune.Part.Two.2024.720p.BluRay-XX [Film (ENG HD)]"), seen)
+
+    def test_decided_cache_excludes_skipped_only(self):
+        decided = {
+            v["clean"]: (v["decision"], v.get("reason", ""))
+            for v in self.FILMS.values()
+            if v.get("clean") and "decision" in v and v.get("status") in autorss.DECIDED_STATUSES
+        }
+        self.assertIn("Dune Part Two (2024)", decided)   # rejected verdict reusable
+        self.assertIn("Frozen (2013)", decided)          # removed -> reuse True on re-acquire
+        self.assertNotIn("Wicked (2024)", decided)       # skipped never asked Deepseek
+        self.assertEqual(decided["Dune Part Two (2024)"], (False, "old"))
+
+
+class TestFlockHeld(unittest.TestCase):
+    """Finding #1: the lock must actually be held while the returned fd is referenced
+    (the bug was callers discarding it, letting the GC drop the lock immediately)."""
+
+    def test_lock_is_held_until_closed(self):
+        path = tempfile.mktemp(suffix=".lock")
+        try:
+            held = C.flock_or_exit(path, LOG)  # keep the reference -> lock held
+            other = open(path, "w")
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.close()  # release
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)  # now succeeds
+            other.close()
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestMutateState(unittest.TestCase):
+    """Finding #4: locked read-modify-write merges into the latest on-disk state, so a
+    later writer can't clobber an earlier one's field."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._sf, self._lf = C.STATE_FILE, C.STATE_LOCK_FILE
+        C.STATE_FILE = os.path.join(self.dir, "state.json")
+        C.STATE_LOCK_FILE = os.path.join(self.dir, ".state.lock")
+
+    def tearDown(self):
+        C.STATE_FILE, C.STATE_LOCK_FILE = self._sf, self._lf
+
+    def test_no_lost_update(self):
+        st = C.mutate_state(lambda s: s["films"].update({"A": {"status": "downloaded", "hash": "h"}}))
+        self.assertIn("films", st)
+        self.assertIn("_meta", st)
+        # a separate writer flips A -> removed (e.g. the manager's reconcile)
+        C.mutate_state(lambda s: s["films"]["A"].update({"status": "removed"}))
+        # then autorss adds B; the removed flag must survive (no clobber)
+        st = C.mutate_state(lambda s: s["films"].update({"B": {"status": "pending"}}))
+        self.assertEqual(st["films"]["A"]["status"], "removed")
+        self.assertIn("B", st["films"])
+        # and it is what's actually on disk
+        disk = C.load_json(C.STATE_FILE, {})
+        self.assertEqual(disk["films"]["A"]["status"], "removed")
+        self.assertIn("B", disk["films"])
+
+
+def _seed(h, size, seeds=0, progress=1.0, uploaded=0):
+    return {"hash": h, "name": h, "size": size,
+            "completed": size if progress >= 1.0 else int(size * progress),
+            "progress": progress, "num_seeds": seeds, "num_leechs": 0, "uploaded": uploaded}
+
+
+class TestEnsureSpaceSafety(unittest.TestCase):
+    """Finding #3: ensure_space deletes ONLY completed 0-peer seeders -- never an
+    in-progress download, never a torrent with peers."""
+
+    def setUp(self):
+        self.real_delete = tm.delete_torrent
+        self.deleted = []
+        tm.delete_torrent = lambda t, st: (self.deleted.append(t["hash"]) or True)
+
+    def tearDown(self):
+        tm.delete_torrent = self.real_delete
+
+    def test_only_completed_zero_peer_seeders_deleted(self):
+        gb = 10 ** 9
+        torrents = [
+            _seed("dead", 100 * gb),                 # completed, 0 peers -> deletable
+            _seed("live", 100 * gb, seeds=5),        # has peers -> protected
+            _seed("dl", 100 * gb, progress=0.4),     # in-progress -> protected
+        ]
+        st = {"zero_since": {}}
+        tm.ensure_space(150.0, torrents, st)   # used=300GB committed, over=150GB
+        self.assertEqual(self.deleted, ["dead"])
+
+    def test_under_cap_deletes_nothing(self):
+        st = {"zero_since": {}}
+        tm.ensure_space(500.0, [_seed("dead", 100 * 10 ** 9)], st)
+        self.assertEqual(self.deleted, [])
+
+
+class TestTorrentSize(unittest.TestCase):
+    """Finding #5: the category cap measures committed (full) size, not partial bytes,
+    so in-flight downloads are reserved at their final footprint."""
+
+    def test_uses_full_size(self):
+        self.assertEqual(C.torrent_size({"size": 10, "completed": 3}), 10)
+        self.assertEqual(C.torrent_size({"completed": 7}), 7)        # no size -> completed
+        self.assertEqual(C.category_used_bytes([{"size": 10, "completed": 3},
+                                                {"size": 5, "completed": 5}]), 15)
+        self.assertEqual(C.category_used_bytes([]), 0)
+        self.assertEqual(C.category_used_bytes(None), 0)
+
+
+class TestAccumulateUploaded(unittest.TestCase):
+    """The exported upload counter must be monotonic: immune to torrent deletion and
+    per-torrent counter resets, so Prometheus increase() (the daily/weekly panels) is
+    correct."""
+
+    def test_monotonic_through_growth_deletion_and_reset(self):
+        st = {}
+        # initial: bank both torrents' current uploaded
+        self.assertEqual(tm.accumulate_uploaded(
+            [{"hash": "a", "uploaded": 100}, {"hash": "b", "uploaded": 50}], st), 150)
+        # 'a' grows by 30, 'b' unchanged
+        self.assertEqual(tm.accumulate_uploaded(
+            [{"hash": "a", "uploaded": 130}, {"hash": "b", "uploaded": 50}], st), 180)
+        # 'b' deleted: total must NOT drop (its growth stays banked); 'b' is pruned
+        self.assertEqual(tm.accumulate_uploaded([{"hash": "a", "uploaded": 130}], st), 180)
+        self.assertNotIn("b", st["up_seen"])
+        # 'a' counter resets (cur < prev) -> count the new accumulation only
+        self.assertEqual(tm.accumulate_uploaded([{"hash": "a", "uploaded": 20}], st), 200)
+
+    def test_uploaded_and_downloaded_track_independently(self):
+        st = {}
+        torrents = [{"hash": "a", "uploaded": 100, "downloaded": 40}]
+        self.assertEqual(tm.accumulate_uploaded(torrents, st), 100)
+        self.assertEqual(tm.accumulate_downloaded(torrents, st), 40)
+        self.assertEqual(st["uploaded_total"], 100)
+        self.assertEqual(st["downloaded_total"], 40)
+        self.assertIn("up_seen", st)
+        self.assertIn("down_seen", st)
 
 
 class TestEnvValue(unittest.TestCase):
@@ -142,16 +330,74 @@ class TestEnvValue(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_exact_match_preferred_over_substring(self):
+        # finding #25: a superset-named var must not shadow the exact one
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:
+            f.write("DEEPSEEK_BACKUP=wrongkey\nDEEPSEEK=rightkey\nNCORE_RSS_KEY=pk\n")
+            path = f.name
+        try:
+            self.assertEqual(C.env_value(path, "DEEPSEEK"), "rightkey")  # exact wins
+            self.assertEqual(C.env_value(path, "NCORE"), "pk")          # substring fallback intact
+        finally:
+            os.unlink(path)
+
+
+class TestQbAddNoAutostop(unittest.TestCase):
+    """The add request must pin ratioLimit/seedingTimeLimit to -1 so a torrent never
+    auto-stops seeding (which would stop counting toward the seeding score)."""
+
+    def test_add_sends_no_limit_flags(self):
+        captured = {}
+        real = C.docker_curl
+        C.docker_curl = lambda args, timeout=40: (captured.__setitem__("args", args), (0, "Ok.\n200", ""))[1]
+        try:
+            accepted, _ = autorss.qb_add("http://example/t.torrent")
+        finally:
+            C.docker_curl = real
+        self.assertTrue(accepted)
+        self.assertIn("ratioLimit=-1", captured["args"])
+        self.assertIn("seedingTimeLimit=-1", captured["args"])
+
+
+class TestAddAttemptCap(unittest.TestCase):
+    """Findings #9/#12: an unconfirmable add is retried a bounded number of times, then
+    marked add_failed so a dead/duplicate URL isn't retried forever."""
+
+    def test_gives_up_after_max_attempts(self):
+        s = {"films": {"x": {"status": "pending"}}}
+        for i in range(1, C.MAX_ADD_ATTEMPTS):
+            autorss._mark_add_attempt(s, "x")
+            self.assertEqual(s["films"]["x"]["add_attempts"], i)
+            self.assertEqual(s["films"]["x"]["status"], "pending")
+        autorss._mark_add_attempt(s, "x")  # the MAX_ADD_ATTEMPTS-th
+        self.assertEqual(s["films"]["x"]["status"], "add_failed")
+        autorss._mark_add_attempt(s, "missing")  # unknown id -> no crash
+
+    def test_mark_downloaded(self):
+        s = {"films": {"x": {"status": "pending"}}}
+        autorss._mark_downloaded(s, "x", "deadbeef", "2026-06-24 12:00:00")
+        self.assertEqual(s["films"]["x"]["status"], "downloaded")
+        self.assertEqual(s["films"]["x"]["hash"], "deadbeef")
+
 
 class TestFilmsMarkdown(unittest.TestCase):
     def test_render_and_escape(self):
         rows = [{"title": "Dune | Part Two (2024)", "status": "downloaded",
-                 "reason": "Blockbuster", "epoch": 1718740800}]
-        md = tm.films_markdown(rows)
-        self.assertIn("| Film | Státusz | Ok | Mikor |", md)
+                 "reason": "Blockbuster", "epoch": 1718740800, "hash": "abc"}]
+        stats = {"abc": {"seed_days": 3.5, "up_gb": 12.0, "ratio": 2.0}}
+        md = tm.films_markdown(rows, stats)
+        self.assertIn("| Film | Státusz | Ok | Hozzáadva | Seedelés (days) | Feltöltve (GB) | Ratio |", md)
         self.assertIn("Dune \\| Part Two (2024)", md)   # pipe escaped so the table isn't broken
         self.assertIn("downloaded", md)
+        self.assertIn("3.5", md)        # seeding-stat columns rendered
+        self.assertIn("12.00", md)
+        self.assertIn("2.00", md)
         self.assertIn("_Nincs jóváhagyott film._", tm.films_markdown([]))
+
+    def test_blank_stats_when_no_live_torrent(self):
+        rows = [{"title": "X", "status": "approved", "reason": "r", "epoch": 0, "hash": "none"}]
+        md = tm.films_markdown(rows, {})   # no stats for this hash -> blank cells
+        self.assertIn("| X | approved | r |", md)
 
 
 if __name__ == "__main__":

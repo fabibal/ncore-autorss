@@ -1,0 +1,64 @@
+# ncore-autorss — Project Guide
+
+nCore RSS → Deepseek mainstream-film filter → qBittorrent auto-seeder, tuned to
+maximise the nCore "ERTEK" seeding score. Three stdlib-only Python scripts running
+on the server via cron (no Docker compose of its own — it drives the existing
+`qbittorrent` container). Prometheus + Grafana monitoring.
+
+## Repo map
+
+- `autorss.py` — main pipeline (cron */15 min). RSS fetch → remux/720p pre-filter →
+  Deepseek verdict → queue downloads (≤`MAX_ACTIVE_DOWNLOADS`, newest-approved first).
+- `torrent-manager.py` — `monitor` (cron 2h + called by autorss in `finally`): peer
+  sampling, metrics, state reconcile, Grafana panel, up/down accumulators.
+  `ensure-space [CAP_GB]`: trim completed 0-peer seeders when the category is over cap.
+  **Never deletes a torrent with peers or one still downloading.**
+- `autorss_common.py` — shared spine: constants, qB API via `docker exec`, flock,
+  locked state I/O (`mutate_state`), `env_value`, the `is_active_download` predicate.
+- `test_autorss.py` — stdlib unittest, no deps (`python3 test_autorss.py`).
+- `docs/` — `architecture.md` (what), `decisions.md` (why), `KNOWN_ISSUES.md` (open).
+
+## qBittorrent access (the core gotcha)
+
+qB runs in the `qbittorrent` Docker container with localhost-auth-bypass. Host
+requests get **403 through Docker NAT**, so every qB API call goes via
+`docker exec qbittorrent curl ...` (`autorss_common.docker_curl`) — never host curl.
+
+## Key tunables (`autorss_common.py`)
+
+| Const | Value | Meaning |
+|---|---|---|
+| `CATEGORY_HARD_GB` | 480 | trim completed 0-peer seeders above this category size |
+| `CATEGORY_CAP_GB` | 500 | hold the queue (don't add) above this |
+| `MAX_ACTIVE_DOWNLOADS` | 3 | concurrent auto-film downloads |
+| `MAX_ADD_ATTEMPTS` | 5 | unconfirmed adds before `status=add_failed` |
+| `STALL_TIMEOUT_S` | 6h | peerless download past this = dead, frees a slot |
+
+Disk policy bounds the **category's committed size**, not host free space; deletion
+is a last resort. Filter regexes, `MAX_YEAR`, and the status sets live in `autorss.py`.
+
+## Key commands
+
+```bash
+python3 test_autorss.py                       # tests (stdlib, no deps)
+python3 torrent-manager.py monitor            # refresh metrics + Grafana panel (never deletes)
+python3 torrent-manager.py ensure-space 480   # manual trim to a cap (GB)
+python3 autorss.py                            # one pipeline run
+docker exec qbittorrent curl -s "http://localhost:8080/api/v2/torrents/info?category=auto-film"
+```
+
+## Context — read when relevant
+
+| Task | Read first |
+|---|---|
+| Architecture / cron / metrics / Grafana / GitHub | `docs/architecture.md` |
+| Why a non-obvious choice was made | `docs/decisions.md` |
+| The seeding score being optimised (ERTEK) | `docs/decisions.md` |
+| Open problems / accepted limitations | `docs/KNOWN_ISSUES.md` |
+
+## CLAUDE.md maintenance rules
+
+- Keep concise (~60 lines). Overflow goes to `docs/`, not here.
+- No detail inferable from the code directly; the *why* lives in `docs/decisions.md`.
+- Secrets (`.env` passkey, Grafana creds, Deepseek key) are gitignored — never
+  document their values.

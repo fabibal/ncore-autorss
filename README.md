@@ -47,10 +47,11 @@ Tunables live in `autorss_common.py` (`CATEGORY_HARD_GB`, `CATEGORY_CAP_GB`,
 
 `torrent-manager.py monitor` writes a Prometheus textfile
 (`autorss.prom` in the node_exporter textfile-collector dir), including
-`autorss_seeding_total`, `autorss_disk_used_gb`, `autorss_uploaded_bytes_total`
-(monotonic), and decision/peer counters. A Grafana "Auto-Film" dashboard row
-visualises these, including daily/weekly uploaded GB via
-`increase(autorss_uploaded_bytes_total[24h])` / `[7d]`.
+`autorss_seeding_total`, `autorss_disk_used_gb`, decision/peer counters, and the
+monotonic, deletion-safe `autorss_uploaded_bytes_total` /
+`autorss_downloaded_bytes_total`. A Grafana "Auto-Film" dashboard row visualises
+these, including daily uploaded/downloaded GB (`increase(...[24h])`) and a 7-day
+upload/download rate graph (`increase(...[1h])`).
 
 ## Cron
 
