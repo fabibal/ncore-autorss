@@ -259,7 +259,7 @@ def _epoch(s):
         return 0
 
 
-def recent_approved_films(limit=10):
+def recent_approved_films(limit=50):
     """Last `limit` Deepseek-approved films (status downloaded or pending), newest first."""
     films = C.load_json(C.STATE_FILE, {"films": {}}).get("films", {})
     rows = []
@@ -301,11 +301,11 @@ def films_markdown(rows, stats=None):
     live torrent (pending, or qB unreachable).
     """
     if not rows:
-        return "_Nincs jóváhagyott film._"
+        return "_No approved films._"
     stats = stats or {}
     def esc(s):
         return str(s).replace("|", "\\|").replace("\n", " ")
-    out = ["| Film | Státusz | Ok | Hozzáadva | Seedelés (days) | Feltöltve (GB) | Ratio |",
+    out = ["| Title | Status | Reason | Added | Seeding (days) | Uploaded (GB) | Ratio |",
            "|---|---|---|---|---|---|---|"]
     for r in rows:
         when = datetime.fromtimestamp(r["epoch"]).strftime("%Y-%m-%d %H:%M") if r["epoch"] else ""

@@ -102,9 +102,14 @@ Written to `/home/fbazsa/monitoring/textfile_collector/`, scraped via node_expor
 - Dashboard "Server Overview", UID `00f835a2-f5ff-4efc-8a88-ddff8d738a3a`,
   **"Auto-Film" row**. Prometheus datasource uid `cf7d75ft6sqo0e`.
 - Panels: 5 stats (Deepseek döntések, Aktív letöltések + seedelés, 0 peer torrentek,
-  Törlések, Disk usage), **Daily Uploaded GB** + **Daily Downloaded GB**
-  (`increase(...[24h])`), an **Upload / Download rate (GB/h)** timeseries
-  (`increase(...[1h])/1e9`, `timeFrom:7d`, GB axis), and a markdown text panel
+  Törlések, Disk usage), a **Daily Upload / Download (GB)** bar chart
+  (`increase(...[1d])/1e9`, 1d step, w=12 at row 2 x=0; green Upload + blue
+  Download). It uses `timeFrom:7d` + `timeShift:-1d` (window `[now-6d, now+1d]`):
+  the +1d end is REQUIRED because a 1d step aligns to UTC midnight, so without it
+  the current in-progress day is never an eval point and the panel renders blank.
+  An **Upload / Download rate (GB/h)** timeseries
+  (`rate(...[$__rate_interval])*3600/1e9`, `timeFrom:30d`, legend
+  mean/max/last, GB axis), and a markdown text panel
   **"Utolsó 10 jóváhagyott film"** (description marker `autorss-films-text`).
 - The text panel is auto-refreshed by `update_films_panel`: GET
   `/api/dashboards/uid/<UID>`, mutate the matched panel, POST `/api/dashboards/db`
