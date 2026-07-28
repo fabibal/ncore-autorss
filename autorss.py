@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
@@ -38,17 +39,22 @@ SYS_PROMPT = (
     "The goal is to seed new, high-demand releases, not old uploads of "
     "classic films. "
     "Today is {today}. "
-    "Answer true ONLY for a film that (a) had a theatrical cinema release, "
-    "(b) is highly anticipated or widely popular with the general public, and "
-    "(c) is currently in cinemas or was released within the last 12 months "
-    "(on or after {cutoff}). "
+    "Answer true ONLY for a mainstream narrative feature film that "
+    "(a) is highly anticipated or widely popular with the general public, "
+    "and (b) is newly out or was released within the last 12 months "
+    "(on or after {cutoff}), whether that release was theatrical, "
+    "streaming-exclusive, or both. The distribution channel does not "
+    "matter -- judge only recency and mainstream popularity. "
     "Answer false for anything older, even famous classics or acclaimed "
     "blockbusters. "
-    "Also answer false for anything that is NOT a theatrically-released "
-    "mainstream feature, including: sports recordings and match broadcasts, "
-    "made-for-TV movies, direct-to-streaming or direct-to-video low-budget "
-    "titles, documentaries, concert and performance films, stand-up specials, "
-    "and similar non-theatrical content. "
+    "Also answer false for anything that is not a mainstream narrative "
+    "feature film, including: sports recordings and match broadcasts, "
+    "TV series and made-for-TV movies, low-budget or obscure direct-to-video "
+    "titles, documentaries, concert and performance films, stand-up "
+    "specials, awards shows, and similar non-film content. "
+    "If the title has no release year, judge its recency and legitimacy "
+    "from your own knowledge of that specific title -- never assume it is "
+    "old or ineligible just because no year was given. "
     "Respond with strict minified JSON only, no markdown and no extra text: "
     '{{"download": true, "reason": "..."}}  with reason under 15 words.'
 ).format(
@@ -81,11 +87,13 @@ MAX_YEAR = datetime.now().year + 1
 
 # Statuses with a real Deepseek verdict (download true/false) whose decision can be
 # reused across quality variants of the same film. Excludes 'skipped' (a per-release
-# quality/format pre-filter, never a film-level verdict).
+# quality/format pre-filter, never a film-level verdict) and 'decide_pending'/
+# 'decide_failed' (no verdict was ever obtained -- nothing to reuse).
 DECIDED_STATUSES = {"pending", "downloaded", "rejected", "removed", "add_failed"}
 # Statuses that should block reprocessing OTHER releases of the same film. Excludes
-# 'skipped' (a different-quality variant may still qualify) and 'removed' (freed for
-# space -- allow re-acquisition when it trends again).
+# 'skipped' (a different-quality variant may still qualify), 'removed' (freed for
+# space -- allow re-acquisition when it trends again), and 'decide_pending'/
+# 'decide_failed' (never evaluated -- must not block a real verdict on another release).
 SEEN_STATUSES = {"pending", "downloaded", "rejected"}
 
 
@@ -122,11 +130,20 @@ def clean_title(raw):
     return cleaned or raw_stripped or raw.strip()
 
 
+def dedup_key(clean):
+    """Case-insensitive form of a clean title for dedup/cache lookups, so an all-caps
+    scene release ("POWER BALLAD (2026)") and a title-case one of the SAME film
+    ("Power Ballad (2026)") share one cache entry instead of costing two Deepseek
+    calls (or worse, two independent -- and possibly different -- verdicts)."""
+    return clean.casefold()
+
+
 def seen_clean_titles(films):
-    """Clean titles with a final disposition (pending/downloaded/rejected) that should
-    block reprocessing other releases of the same film. Excludes 'skipped' and 'removed'
-    so a different-quality variant or a re-trending freed film can still be picked up."""
-    return {v.get("clean") for v in films.values()
+    """Dedup keys of clean titles with a final disposition (pending/downloaded/rejected)
+    that should block reprocessing other releases of the same film. Excludes 'skipped'
+    and 'removed' so a different-quality variant or a re-trending freed film can still
+    be picked up."""
+    return {dedup_key(v["clean"]) for v in films.values()
             if v.get("clean") and v.get("status") in SEEN_STATUSES}
 
 
@@ -156,7 +173,12 @@ def fetch_films(rss_key):
 
 
 def ask_deepseek(clean, key):
-    """Return (download: bool, reason: str). Raises on API/parse failure."""
+    """Return (download: bool, reason: str). Raises on API/parse failure.
+
+    On an HTTP error, reads the response BODY (DeepSeek's actual error detail, e.g. a
+    content-policy or request-format complaint) into the exception message instead of
+    just the bare status line -- otherwise a recurring failure is undiagnosable from
+    the log alone (all we'd ever see is "HTTP Error 400: Bad Request")."""
     body = json.dumps(
         {
             "model": DEEPSEEK_MODEL,
@@ -173,8 +195,12 @@ def ask_deepseek(clean, key):
         DEEPSEEK_URL, data=body, method="POST",
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
     )
-    with urllib.request.urlopen(req, timeout=60) as r:
-        resp = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            resp = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"HTTP {e.code} {e.reason}: {detail}") from None
     content = resp["choices"][0]["message"]["content"].strip()
     content = re.sub(r"^```(?:json)?|```$", "", content, flags=re.M).strip()
     obj = json.loads(content)
@@ -306,14 +332,19 @@ def _run():
         log.warning("RSS returned 0 items -- passkey expired or feed down?")
     write_run_metrics(state["_meta"])
 
-    new = [f for f in films if f["id"] not in state["films"]]
+    # "new" also includes a previously-failed Deepseek call still under its retry cap
+    # (status=decide_pending) -- it never got a real verdict, so it must be retried,
+    # not treated as already-seen.
+    new = [f for f in films if f["id"] not in state["films"]
+           or state["films"][f["id"]].get("status") == "decide_pending"]
     log.info("run start: %d items, %d film(s), %d new", n_items, len(films), len(new))
 
     # Reuse a prior Deepseek verdict across quality variants of one film. Only real
     # verdicts -- NOT quality/format skips -- so a 720p variant of a remux-skipped film
-    # still gets evaluated on its own merits.
+    # still gets evaluated on its own merits. Keyed by dedup_key so an all-caps and a
+    # title-case release of the same film share one cached verdict.
     decided = {
-        v["clean"]: (v["decision"], v.get("reason", ""))
+        dedup_key(v["clean"]): (v["decision"], v.get("reason", ""))
         for v in state["films"].values()
         if v.get("clean") and "decision" in v and v.get("status") in DECIDED_STATUSES
     }
@@ -321,7 +352,8 @@ def _run():
     seen_clean = seen_clean_titles(state["films"])
     for f in new:
         clean = clean_title(f["title"])
-        if clean in seen_clean:
+        key = dedup_key(clean)
+        if key in seen_clean:
             log.info("already seen: %s", f["title"])
             continue
         if REMUX_RE.search(f["title"]):
@@ -338,21 +370,30 @@ def _run():
             state = C.mutate_state(lambda s, fid=f["id"], r=rec: s["films"].__setitem__(fid, r))
             log.info("SKIP | %r | reason=quality filter (720p only)", f["title"])
             continue
-        cached = clean in decided
+        cached = key in decided
         if cached:
-            decision, reason = decided[clean]
+            decision, reason = decided[key]
         else:
             try:
                 decision, reason = ask_deepseek(clean, deepseek_key)
             except Exception as e:
-                log.error("deepseek error for %r (will retry next run): %s", clean, e)
+                state = C.mutate_state(
+                    lambda s, fid=f["id"], t=f["title"], c=clean, l=f["link"], err=str(e):
+                        _mark_decide_attempt(s, fid, t, c, l, err))
+                attempt_rec = state["films"][f["id"]]
+                if attempt_rec["status"] == "decide_failed":
+                    log.error("DECIDE FAILED | %r -- giving up after %d attempts: %s",
+                              clean, C.MAX_DECIDE_ATTEMPTS, e)
+                else:
+                    log.error("deepseek error for %r (attempt %d/%d, will retry): %s",
+                              clean, attempt_rec["decide_attempts"], C.MAX_DECIDE_ATTEMPTS, e)
                 continue
-            decided[clean] = (decision, reason)
+            decided[key] = (decision, reason)
         rec = {"title": f["title"], "clean": clean, "decision": decision, "reason": reason,
                "status": "pending" if decision else "rejected",
                "link": f["link"], "asked_ts": now()}
         state = C.mutate_state(lambda s, fid=f["id"], r=rec: s["films"].__setitem__(fid, r))
-        seen_clean.add(clean)
+        seen_clean.add(key)
         log.info("DECISION%s | %r -> download=%s | reason=%r",
                  " (cached)" if cached else "", clean, decision, reason)
 
@@ -430,6 +471,26 @@ def _mark_downloaded(s, fid, thash, added_ts):
     f = s["films"].get(fid)
     if f is not None:
         f.update({"status": "downloaded", "added_ts": added_ts, "hash": thash})
+
+
+def _mark_decide_attempt(s, fid, title, clean, link, detail):
+    """Record a failed Deepseek call and count it; after MAX_DECIDE_ATTEMPTS give up
+    (status=decide_failed) so a title that fails every time isn't retried forever. The
+    `detail` (from ask_deepseek, includes the HTTP body when available) is kept as the
+    reason so a stuck title is diagnosable from state.json, not just a log line that
+    ages out. decision stays None throughout -- this is not a real verdict, so it must
+    never be counted as approved/rejected (compute_metrics uses `is True`/`is False`)
+    nor reused via DECIDED_STATUSES/SEEN_STATUSES."""
+    n = s["films"].get(fid, {}).get("decide_attempts", 0) + 1
+    rec = {"title": title, "clean": clean, "link": link, "asked_ts": now(),
+           "decision": None, "decide_attempts": n}
+    if n >= C.MAX_DECIDE_ATTEMPTS:
+        rec["status"] = "decide_failed"
+        rec["reason"] = f"deepseek call failed {n}x, giving up: {detail}"[:300]
+    else:
+        rec["status"] = "decide_pending"
+        rec["reason"] = f"deepseek call failed (attempt {n}/{C.MAX_DECIDE_ATTEMPTS}): {detail}"[:300]
+    s["films"][fid] = rec
 
 
 def _mark_add_attempt(s, fid):

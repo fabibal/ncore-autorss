@@ -12,6 +12,22 @@ behaviour, in `docs/decisions.md`.
   `MAX_YEAR` bound. Worst case: two variants of such a film get different dedup keys
   (a redundant Deepseek call), not data loss.
 
+- **A no-year title can still be misjudged if Deepseek doesn't recognize it.** When a
+  release carries no year at all (a real, common scene-naming gap, not just the
+  numeric-title case above), `ask_deepseek` has no date to check and SYS_PROMPT tells
+  the model to judge recency from its own knowledge instead of defaulting to "old".
+  Verified live: this fixes the case where the model already recognizes the specific
+  title (e.g. a well-known franchise sequel is correctly approved even with no year).
+  It does NOT fix the case where the model has no confident knowledge of a real but
+  less-famous title — a small theatrical/streaming release it can't place from the
+  title alone still gets rejected as "old", same as before. This is a genuine
+  model-knowledge gap, not a promptable bias — a more permissive "assume new unless
+  proven old" variant was tested live and did not fix the failing case either, though
+  it also didn't regress genuinely-old titles. Closing it for real would mean fetching
+  actual metadata per no-year title (e.g. the nCore torrent detail page linked in the
+  RSS item, or an external film database) — deliberately out of scope for now;
+  accepted as a residual limitation.
+
 - **`ensure-space` can no-op under lock contention (low impact).** If the 2-hour cron
   `monitor` holds `.manager.lock` exactly when an autorss run spawns `ensure-space`,
   the trim is skipped (the manager exits on the held lock). Harmless: autorss's

@@ -33,6 +33,7 @@ CATEGORY_HARD_GB = 480.0  # hard: above this, delete 0-peer torrents down toward
 CATEGORY_CAP_GB = 500.0   # soft cap: above this, hold the queue (don't download)
 MAX_ACTIVE_DOWNLOADS = 3  # concurrent auto-film downloads (was effectively 1) -> faster count growth + catches upload peaks
 MAX_ADD_ATTEMPTS = 5      # give up a pending film after this many unconfirmed adds (avoid retrying a dead URL forever)
+MAX_DECIDE_ATTEMPTS = 5   # give up asking Deepseek after this many failed calls (avoid retrying a bad title forever)
 
 DL_STOPPED = {"stoppedDL", "pausedDL", "error", "missingFiles"}
 UP_STOPPED = {"stoppedUP", "pausedUP", "error", "missingFiles"}

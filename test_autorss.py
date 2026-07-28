@@ -18,14 +18,25 @@ Covers:
   - accumulate_uploaded monotonic + deletion-safe upload counter (dashboard panels).
   - env_value() exact-match preference, qb_add no-auto-stop flags, add-attempt cap.
   - films_markdown() rendering, seeding-stat columns, and pipe escaping.
+  - dedup_key() case-insensitivity: an all-caps and a title-case release of the same
+    film share one seen/decided entry instead of costing a redundant Deepseek call.
+  - SYS_PROMPT policy: streaming-exclusive titles are not penalised vs theatrical,
+    sports/non-film content stays excluded, and a title with no release year is
+    judged from the model's own knowledge instead of defaulting to "old".
+  - ask_deepseek() surfaces the HTTP error body so a recurring failure is diagnosable.
+  - decide-attempt cap: a title whose Deepseek call keeps failing is retried a bounded
+    number of times then marked decide_failed, never looped on forever.
 """
 import fcntl
 import importlib.util
+import io
 import logging
 import os
 import sys
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, "/home/fbazsa/ncore-autorss")
 import autorss
@@ -153,6 +164,95 @@ class TestRemuxFilter(unittest.TestCase):
             self.assertFalse(R.search(raw), msg=raw)
 
 
+class TestSysPromptPolicy(unittest.TestCase):
+    """The approval prompt must not require a theatrical release -- a streaming-
+    exclusive title (e.g. a Netflix/Amazon original) can be just as mainstream and
+    high-demand -- but sports broadcasts and other non-film content must stay
+    excluded, and a title with no release year must be judged from the model's own
+    knowledge rather than defaulting to "old" (root cause of the Night Patrol
+    rejected-then-approved inconsistency)."""
+
+    def test_theatrical_release_not_required(self):
+        p = autorss.SYS_PROMPT.lower()
+        self.assertNotIn("had a theatrical cinema release", p)
+        self.assertNotIn("direct-to-streaming", p)
+        self.assertIn("distribution channel does not", p)
+        self.assertIn("streaming-exclusive", p)
+
+    def test_sports_and_non_film_content_still_excluded(self):
+        p = autorss.SYS_PROMPT.lower()
+        for term in ("sports recordings", "match broadcasts", "documentaries",
+                     "stand-up specials", "made-for-tv movies", "awards shows"):
+            self.assertIn(term, p, msg=term)
+
+    def test_missing_year_guidance_present(self):
+        p = autorss.SYS_PROMPT.lower()
+        self.assertIn("no release year", p)
+        self.assertIn("never assume it is", p)
+
+    def test_json_response_format_instruction_intact(self):
+        # the {{"download": true, ...}} example must survive the .format() call unescaped
+        self.assertIn('"download": true', autorss.SYS_PROMPT)
+
+
+class TestAskDeepseekErrorDiagnosable(unittest.TestCase):
+    """A DeepSeek HTTP error must surface the response BODY (the API's actual error
+    detail), not just the bare status line -- otherwise a recurring failure is
+    undiagnosable from the log (all that was ever recorded was
+    "HTTP Error 400: Bad Request", with no indication of why)."""
+
+    def test_http_error_body_included_in_message(self):
+        err_body = b'{"error": {"message": "something specific broke"}}'
+
+        def fake_urlopen(req, timeout=60):
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(err_body))
+
+        real = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                autorss.ask_deepseek("Some Title (2026)", "fake-key")
+            self.assertIn("something specific broke", str(ctx.exception))
+            self.assertIn("400", str(ctx.exception))
+        finally:
+            urllib.request.urlopen = real
+
+
+class TestDecideAttemptCap(unittest.TestCase):
+    """A title whose Deepseek call keeps failing is retried a bounded number of times
+    (status=decide_pending, with the failure detail kept as `reason` so it's
+    diagnosable) then given up on (status=decide_failed) -- never looped on forever."""
+
+    def test_gives_up_after_max_attempts_and_stays_diagnosable(self):
+        s = {"films": {}}
+        for i in range(1, C.MAX_DECIDE_ATTEMPTS):
+            autorss._mark_decide_attempt(s, "x", "Some.Title.2026 [Film (ENG HD)]",
+                                          "Some Title (2026)", "http://link", "HTTP 400: boom")
+            self.assertEqual(s["films"]["x"]["decide_attempts"], i)
+            self.assertEqual(s["films"]["x"]["status"], "decide_pending")
+            self.assertIn("boom", s["films"]["x"]["reason"])
+            self.assertIsNone(s["films"]["x"]["decision"])
+        autorss._mark_decide_attempt(s, "x", "Some.Title.2026 [Film (ENG HD)]",
+                                      "Some Title (2026)", "http://link", "HTTP 400: boom")
+        self.assertEqual(s["films"]["x"]["status"], "decide_failed")
+        self.assertIsNone(s["films"]["x"]["decision"])
+
+    def test_decide_pending_and_failed_excluded_from_seen_and_decided(self):
+        # neither status is a real verdict -> must not block other releases of the
+        # same film (SEEN_STATUSES) nor be reused as a cached decision (DECIDED_STATUSES)
+        films = {
+            "a": {"clean": "Some Title (2026)", "status": "decide_pending", "decision": None},
+            "b": {"clean": "Other Title (2026)", "status": "decide_failed", "decision": None},
+        }
+        self.assertEqual(autorss.seen_clean_titles(films), set())
+        decided = {
+            autorss.dedup_key(v["clean"]): v["decision"]
+            for v in films.values()
+            if v.get("clean") and "decision" in v and v.get("status") in autorss.DECIDED_STATUSES
+        }
+        self.assertEqual(decided, {})
+
+
 class TestSeenAndDecidedStatuses(unittest.TestCase):
     """Findings #2/#10/#11: a per-release quality 'skipped' or a space-freed 'removed'
     film must NOT block a legitimate variant; only a real Deepseek verdict
@@ -170,24 +270,52 @@ class TestSeenAndDecidedStatuses(unittest.TestCase):
 
     def test_seen_excludes_skipped_and_removed(self):
         seen = autorss.seen_clean_titles(self.FILMS)
-        self.assertEqual(seen, {"Dune Part Two (2024)", "Michael (2026)", "Heretic (2024)"})
+        self.assertEqual(seen, {autorss.dedup_key("Dune Part Two (2024)"),
+                                 autorss.dedup_key("Michael (2026)"),
+                                 autorss.dedup_key("Heretic (2024)")})
         # a freed ('removed') film's new release is NOT blocked -> can be re-acquired
-        self.assertNotIn(autorss.clean_title("Frozen.2013.720p.WEB-DL.x264-OTHER [Film (ENG HD)]"), seen)
+        self.assertNotIn(autorss.dedup_key(autorss.clean_title(
+            "Frozen.2013.720p.WEB-DL.x264-OTHER [Film (ENG HD)]")), seen)
         # a quality-'skipped' film's 720p variant is NOT blocked -> gets reconsidered
-        self.assertNotIn(autorss.clean_title("Wicked.2024.720p.BluRay-XX [Film (ENG HD)]"), seen)
+        self.assertNotIn(autorss.dedup_key(autorss.clean_title(
+            "Wicked.2024.720p.BluRay-XX [Film (ENG HD)]")), seen)
         # a rejected/downloaded film's other release IS blocked
-        self.assertIn(autorss.clean_title("Dune.Part.Two.2024.720p.BluRay-XX [Film (ENG HD)]"), seen)
+        self.assertIn(autorss.dedup_key(autorss.clean_title(
+            "Dune.Part.Two.2024.720p.BluRay-XX [Film (ENG HD)]")), seen)
+        # an ALL-CAPS scene release of an already-blocked film is ALSO blocked
+        self.assertIn(autorss.dedup_key(autorss.clean_title(
+            "DUNE.PART.TWO.2024.720P.BLURAY-XX [Film (ENG HD)]")), seen)
 
     def test_decided_cache_excludes_skipped_only(self):
         decided = {
-            v["clean"]: (v["decision"], v.get("reason", ""))
+            autorss.dedup_key(v["clean"]): (v["decision"], v.get("reason", ""))
             for v in self.FILMS.values()
             if v.get("clean") and "decision" in v and v.get("status") in autorss.DECIDED_STATUSES
         }
-        self.assertIn("Dune Part Two (2024)", decided)   # rejected verdict reusable
-        self.assertIn("Frozen (2013)", decided)          # removed -> reuse True on re-acquire
-        self.assertNotIn("Wicked (2024)", decided)       # skipped never asked Deepseek
-        self.assertEqual(decided["Dune Part Two (2024)"], (False, "old"))
+        self.assertIn(autorss.dedup_key("Dune Part Two (2024)"), decided)   # rejected verdict reusable
+        self.assertIn(autorss.dedup_key("Frozen (2013)"), decided)         # removed -> reuse True on re-acquire
+        self.assertNotIn(autorss.dedup_key("Wicked (2024)"), decided)      # skipped never asked Deepseek
+        self.assertEqual(decided[autorss.dedup_key("Dune Part Two (2024)")], (False, "old"))
+        # cross-case lookup hits the same cached verdict (no redundant Deepseek call)
+        self.assertEqual(decided[autorss.dedup_key("DUNE PART TWO (2024)")], (False, "old"))
+
+
+class TestDedupKeyCaseInsensitive(unittest.TestCase):
+    """An all-caps scene release and a title-case release of the SAME film must share
+    one dedup/cache entry. Before this fix, 'POWER.BALLAD.2026...' (all-caps) and
+    'Power.Ballad.2026...' (title-case) produced different clean_title() strings and
+    so were treated as two unrelated films -- a redundant Deepseek call at best, two
+    independently-diverging verdicts at worst."""
+
+    def test_case_insensitive_match(self):
+        a = autorss.clean_title("Power.Ballad.2026.1080p.WEB.h264-ETHEL [Film (ENG HD)]")
+        b = autorss.clean_title("POWER.BALLAD.2026.720p.AMZN.WEB-DL.DDP5.1.Atmos.H.264-BYNDR [Film (ENG HD)]")
+        self.assertNotEqual(a, b)                          # display casing legitimately differs
+        self.assertEqual(autorss.dedup_key(a), autorss.dedup_key(b))  # dedup key matches
+
+    def test_accented_titles_casefold(self):
+        # Hungarian accented characters must fold consistently too
+        self.assertEqual(autorss.dedup_key("Féltékenység"), autorss.dedup_key("FÉLTÉKENYSÉG"))
 
 
 class TestFlockHeld(unittest.TestCase):
@@ -386,13 +514,13 @@ class TestFilmsMarkdown(unittest.TestCase):
                  "reason": "Blockbuster", "epoch": 1718740800, "hash": "abc"}]
         stats = {"abc": {"seed_days": 3.5, "up_gb": 12.0, "ratio": 2.0}}
         md = tm.films_markdown(rows, stats)
-        self.assertIn("| Film | Státusz | Ok | Hozzáadva | Seedelés (days) | Feltöltve (GB) | Ratio |", md)
+        self.assertIn("| Title | Status | Reason | Added | Seeding (days) | Uploaded (GB) | Ratio |", md)
         self.assertIn("Dune \\| Part Two (2024)", md)   # pipe escaped so the table isn't broken
         self.assertIn("downloaded", md)
         self.assertIn("3.5", md)        # seeding-stat columns rendered
         self.assertIn("12.00", md)
         self.assertIn("2.00", md)
-        self.assertIn("_Nincs jóváhagyott film._", tm.films_markdown([]))
+        self.assertIn("_No approved films._", tm.films_markdown([]))
 
     def test_blank_stats_when_no_live_torrent(self):
         rows = [{"title": "X", "status": "approved", "reason": "r", "epoch": 0, "hash": "none"}]

@@ -89,10 +89,30 @@ non-localhost source and get **403**. Issuing `curl` from inside the container
 
 ## Deepseek filter scope
 
-Approve only theatrically-released, mainstream films from the last 12 months
-(rolling cutoff in `SYS_PROMPT`); reject classics, TV movies, direct-to-streaming,
-docs, sports, concerts. This serves `up(interval)` (high demand) and `avg(torrdate)`
-(fresh). Verdicts are cached per clean title so quality variants reuse one call.
+Approve mainstream, high-demand films from the last 12 months (rolling cutoff in
+`SYS_PROMPT`) regardless of distribution channel -- a streaming-exclusive original
+(Netflix/Amazon/etc.) is judged the same as a theatrical release, since it can
+generate just as much seeding demand. Reject classics, TV series/movies, low-budget
+direct-to-video, docs, sports, concerts, awards shows. This serves `up(interval)`
+(high demand) and `avg(torrdate)` (fresh). Verdicts are cached per clean title (via
+`dedup_key`, case-insensitive) so quality variants -- including differently-cased
+scene releases of the same film -- reuse one call.
+
+Distribution channel was dropped as a criterion because it no longer tracked
+"mainstream/anticipated": plenty of streaming-exclusive originals are just as
+popular as theatrical films, and the old wording caused real false positives
+(a Netflix-exclusive sequel was approved on the false claim of a "theatrical
+release") without protecting against anything -- the sports/TV/documentary/
+low-budget exclusions do the actual filtering work.
+
+When `clean_title` finds no release year (a real, common scene-naming gap, not
+just the numeric-title case below), `ask_deepseek` gets no date to check against.
+SYS_PROMPT now explicitly tells the model not to default to "old" just because a
+year is missing, and to judge recency from its own knowledge of that exact title
+instead. Verified live: this fixes the case where the model already recognizes the
+title (e.g. a well-known franchise sequel), but NOT the case where it doesn't
+confidently know the specific title -- that's a model-knowledge gap no prompt
+wording can close, not a fixable bias. See KNOWN_ISSUES.md.
 
 ## 720p-only filter (open tradeoff)
 
