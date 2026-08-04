@@ -543,6 +543,67 @@ class TestEnsureSpaceSmallestSufficient(unittest.TestCase):
         self.assertEqual(self.deleted, ["t00"])
 
 
+class TestSelectVictimsMatchesRealRun(unittest.TestCase):
+    """`dryrun-ensure-space.py` promises to show what a real trim WOULD delete, and it is
+    trusted before an irreversible delete -- so the plan it prints must not be able to
+    drift from what ensure_space actually does. Both call select_victims; these tests pin
+    that they agree, which is what makes the standalone script safe to keep."""
+
+    def setUp(self):
+        self.real_delete = tm.delete_torrent
+        self.deleted = []
+        tm.delete_torrent = lambda t, st: (self.deleted.append(t["hash"]), True)[1]
+
+    def tearDown(self):
+        tm.delete_torrent = self.real_delete
+
+    @staticmethod
+    def _plan(torrents, over, zs):
+        """The dry-run's own replay of ensure_space's stop condition: delete down the
+        victim list only until the overage is covered."""
+        victims, _ = tm.select_victims(torrents, over, zs, 0.0)
+        plan, freed = [], 0
+        for t in victims:
+            if freed >= over:
+                break
+            plan.append(t["hash"])
+            freed += tm.disk_bytes(t)
+        return plan
+
+    def _assert_agrees(self, torrents, over_gb, zs=None):
+        zs = zs or {}
+        used = C.category_used_bytes(torrents)
+        cap_gb = (used - over_gb * 1e9) / 1e9
+        over = used - int(cap_gb * 1e9)
+        predicted = self._plan(torrents, over, zs)
+        tm.ensure_space(cap_gb, torrents, {"zero_since": dict(zs)})
+        self.assertEqual(predicted, self.deleted)
+
+    def test_agrees_when_one_candidate_covers_the_overage(self):
+        self._assert_agrees([_seed("t%d" % i, int(gb * 10 ** 9))
+                             for i, gb in enumerate(POOL_GB)], 2.9)
+
+    def test_agrees_when_candidates_must_be_combined(self):
+        self._assert_agrees([_seed("t%d" % i, int(gb * 10 ** 9))
+                             for i, gb in enumerate([1.0, 2.0, 3.0])], 4.5)
+
+    def test_agrees_on_the_equal_size_tie_break(self):
+        self._assert_agrees([_seed("t%d" % i, 5 * 10 ** 9) for i in range(3)], 1.0,
+                            zs={"t0": 3000.0, "t1": 1000.0, "t2": 2000.0})
+
+    def test_plan_excludes_peered_and_incomplete_torrents(self):
+        torrents = [_seed("dead", 9 * 10 ** 9),
+                    _seed("live", 1 * 10 ** 9, seeds=3),
+                    _seed("dl", 1 * 10 ** 9, progress=0.5)]
+        victims, _ = tm.select_victims(torrents, 1, {}, 0.0)
+        self.assertEqual([t["hash"] for t in victims], ["dead"])
+
+    def test_single_is_none_only_when_no_candidate_covers_alone(self):
+        torrents = [_seed("t%d" % i, int(gb * 10 ** 9)) for i, gb in enumerate([1.0, 2.0])]
+        self.assertIsNone(tm.select_victims(torrents, 5 * 10 ** 9, {}, 0.0)[1])
+        self.assertIsNotNone(tm.select_victims(torrents, 2 * 10 ** 9, {}, 0.0)[1])
+
+
 class TestTorrentSize(unittest.TestCase):
     """Finding #5: the category cap measures committed (full) size, not partial bytes,
     so in-flight downloads are reserved at their final footprint."""

@@ -15,6 +15,8 @@ on the server via cron (no Docker compose of its own — it drives the existing
   **Never deletes a torrent with peers or one still downloading.**
 - `autorss_common.py` — shared spine: constants, qB API via `docker exec`, flock,
   locked state I/O (`mutate_state`), `env_value`, the `is_active_download` predicate.
+- `dryrun-ensure-space.py` — read-only: prints the trim plan `ensure-space` would follow
+  (shares `select_victims`, so it can't drift from the real run). Deletes nothing.
 - `test_autorss.py` — stdlib unittest, no deps (`python3 test_autorss.py`).
 - `docs/` — `architecture.md` (what), `decisions.md` (why), `KNOWN_ISSUES.md` (open).
 
@@ -42,6 +44,7 @@ is a last resort. Filter regexes, `MAX_YEAR`, and the status sets live in `autor
 ```bash
 python3 test_autorss.py                       # tests (stdlib, no deps)
 python3 torrent-manager.py monitor            # refresh metrics + Grafana panel (never deletes)
+python3 dryrun-ensure-space.py [CAP_GB ...]   # what a trim WOULD delete (read-only)
 python3 torrent-manager.py ensure-space 480   # manual trim to a cap (GB)
 python3 autorss.py                            # one pipeline run
 docker exec qbittorrent curl -s "http://localhost:8080/api/v2/torrents/info?category=auto-film"

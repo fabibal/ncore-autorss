@@ -102,6 +102,28 @@ def delete_torrent(t, st):
     return False
 
 
+def select_victims(torrents, over, zs, now):
+    """Ordered deletion plan for an `over`-byte overage. Candidates are completed 0-peer
+    seeders ONLY, sorted smallest-first (ties broken by longest at 0 peers); the smallest
+    single candidate that alone covers `over` is promoted to the front. Returns
+    (victims, single) where `single` is None when no one candidate covers the overage and
+    they must be combined smallest-first.
+
+    Pure and side-effect-free purely so `dryrun-ensure-space.py` can print the exact plan
+    a real run would follow. A dry-run that reimplemented this selection would silently
+    drift from it the next time the sort key changes -- and a dry-run that lies is worse
+    than none, since its whole job is to be trusted before an irreversible delete."""
+    cands = sorted(
+        (t for t in torrents if peers(t) == 0 and (t.get("progress") or 0) >= 1.0),
+        key=lambda t: (disk_bytes(t), zs.get(t.get("hash"), now)),
+    )
+    # The leader covers the overage alone; the rest follow smallest-first so a FAILED
+    # delete still falls through to the next-best option instead of giving up.
+    single = next((t for t in cands if disk_bytes(t) >= over), None)
+    victims = cands if single is None else [single] + [t for t in cands if t is not single]
+    return victims, single
+
+
 def ensure_space(cap_gb, torrents, st):
     """Keep the auto-film CATEGORY at or below cap_gb by deleting the SMALLEST SUFFICIENT
     set of COMPLETED 0-peer seeders. Never deletes a torrent with peers, nor one still
@@ -132,18 +154,9 @@ def ensure_space(cap_gb, torrents, st):
     zs = st.setdefault("zero_since", {})
     now = time.time()  # sampled ONCE: a time.time() call inside the sort key would give
                        # an untracked candidate a different value on each comparison.
-    # Only completed seeders are eligible -- an in-progress download is never a victim.
-    cands = sorted(
-        (t for t in torrents if peers(t) == 0 and (t.get("progress") or 0) >= 1.0),
-        key=lambda t: (disk_bytes(t), zs.get(t.get("hash"), now)),
-    )
-    # Smallest single candidate that covers the whole overage, if there is one. It leads
-    # the victim list; the rest follow smallest-first so a FAILED delete still falls
-    # through to the next-best option instead of giving up.
-    single = next((t for t in cands if disk_bytes(t) >= over), None)
-    victims = cands if single is None else [single] + [t for t in cands if t is not single]
+    victims, single = select_victims(torrents, over, zs, now)
     log.info("ensure-space | category %.1f GB > cap %.1f GB (over %.1f GB); %d 0-peer candidate(s); "
-             "plan=%s", used / 1e9, cap_gb, over / 1e9, len(cands),
+             "plan=%s", used / 1e9, cap_gb, over / 1e9, len(victims),
              "smallest sufficient (%.2f GB)" % (disk_bytes(single) / 1e9) if single is not None
              else "no single candidate covers it; combining smallest-first")
     reclaim = 0
