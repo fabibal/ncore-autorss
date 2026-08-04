@@ -7,10 +7,11 @@ Modes:
                           textfile metrics, refresh the Grafana "recent films" text panel.
                           Never deletes.
   ensure-space [CAP_GB]   Called by autorss before adding a torrent. If the auto-film
-                          CATEGORY's committed size exceeds CAP_GB, delete the worst
-                          completed 0-peer seeders (longest at 0 peers, largest on disk
-                          to break ties) until the category is back under CAP_GB. Never
-                          deletes a torrent with connected peers or one still downloading.
+                          CATEGORY's committed size exceeds CAP_GB, delete the SMALLEST
+                          SUFFICIENT completed 0-peer seeders (smallest single candidate
+                          that covers the overage; otherwise smallest-first until it is
+                          covered) to get back under CAP_GB. Never deletes a torrent with
+                          connected peers or one still downloading.
 
 Shared infra (qB via docker exec, the active-download rule, json/log/lock helpers,
 constants) lives in autorss_common. Stdlib only.
@@ -102,28 +103,51 @@ def delete_torrent(t, st):
 
 
 def ensure_space(cap_gb, torrents, st):
-    """Keep the auto-film CATEGORY at or below cap_gb by deleting COMPLETED 0-peer
-    seeders (longest at 0 peers first, largest on disk to break ties). Never deletes a
-    torrent with peers, nor one still downloading -- candidates are disjoint from the
-    queue gate's domain (incomplete downloads), so the two never disagree about the same
-    torrent. Deletion is a last resort -- the score rewards seeders -- so this only acts
-    when the category's committed size exceeds the cap."""
+    """Keep the auto-film CATEGORY at or below cap_gb by deleting the SMALLEST SUFFICIENT
+    set of COMPLETED 0-peer seeders. Never deletes a torrent with peers, nor one still
+    downloading -- candidates are disjoint from the queue gate's domain (incomplete
+    downloads), so the two never disagree about the same torrent. Deletion is a last
+    resort -- the score rewards seeders -- so this only acts when the category's
+    committed size exceeds the cap.
+
+    Selection (changed 2026-08-04): pick the SMALLEST single candidate that alone covers
+    the overage; only if no single one covers it, combine smallest-first until it does.
+    Previously this deleted the candidate that had been at 0 peers LONGEST, which is
+    uncorrelated with the overage and routinely destroyed far more than needed -- live,
+    a 0.2 GB overage cost a 3.82 GB seeder (19x), and the next victim in line was the
+    category's oldest and second-largest contributor (46 d seeding, 121 GB uploaded,
+    ratio 4.85) for a ~3 GB overage. Every seeder deleted destroys accrued seed time and
+    can drop an ERTEK count tier, so freeing the least is freeing the best.
+
+    Time-at-0-peers survives as the SECONDARY key: among candidates of equal size, the
+    one dead longest goes first. That replaces the old `-disk_bytes` tie-break, which was
+    unreachable dead code -- `zero_since` values are per-torrent `time.time()` floats
+    (microseconds apart even within one sampling run), so the primary key never tied.
+    Byte sizes DO tie exactly, so this tie-break actually fires."""
     used = C.category_used_bytes(torrents)  # committed size, matching the autorss cap gate
     over = used - int(cap_gb * 1e9)
     if over <= 0:
         log.info("ensure-space | category %.1f GB <= cap %.1f GB; no deletion", used / 1e9, cap_gb)
         return
     zs = st.setdefault("zero_since", {})
-    # worst candidate first: longest at 0 peers (oldest timestamp), then largest on disk.
+    now = time.time()  # sampled ONCE: a time.time() call inside the sort key would give
+                       # an untracked candidate a different value on each comparison.
     # Only completed seeders are eligible -- an in-progress download is never a victim.
     cands = sorted(
         (t for t in torrents if peers(t) == 0 and (t.get("progress") or 0) >= 1.0),
-        key=lambda t: (zs.get(t.get("hash"), time.time()), -disk_bytes(t)),
+        key=lambda t: (disk_bytes(t), zs.get(t.get("hash"), now)),
     )
-    log.info("ensure-space | category %.1f GB > cap %.1f GB (over %.1f GB); %d 0-peer candidate(s)",
-             used / 1e9, cap_gb, over / 1e9, len(cands))
+    # Smallest single candidate that covers the whole overage, if there is one. It leads
+    # the victim list; the rest follow smallest-first so a FAILED delete still falls
+    # through to the next-best option instead of giving up.
+    single = next((t for t in cands if disk_bytes(t) >= over), None)
+    victims = cands if single is None else [single] + [t for t in cands if t is not single]
+    log.info("ensure-space | category %.1f GB > cap %.1f GB (over %.1f GB); %d 0-peer candidate(s); "
+             "plan=%s", used / 1e9, cap_gb, over / 1e9, len(cands),
+             "smallest sufficient (%.2f GB)" % (disk_bytes(single) / 1e9) if single is not None
+             else "no single candidate covers it; combining smallest-first")
     reclaim = 0
-    for t in cands:
+    for t in victims:
         if reclaim >= over:
             break
         if delete_torrent(t, st):

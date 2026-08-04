@@ -26,7 +26,26 @@ behaviour, in `docs/decisions.md`.
   it also didn't regress genuinely-old titles. Closing it for real would mean fetching
   actual metadata per no-year title (e.g. the nCore torrent detail page linked in the
   RSS item, or an external film database) — deliberately out of scope for now;
-  accepted as a residual limitation.
+  accepted as a residual limitation. Since the recognition gate went in, "I don't know
+  this title" is explicit policy (it fails criterion (a)) rather than an accident of
+  the model defaulting to "old".
+
+- **Recognition is self-reported, so it can be confabulated.** The approval gate makes
+  the model name the cast, director, studio or franchise it recognises a film by, and
+  reject when it can name none. That reliably kills year-token guessing, but a *named*
+  fact is not a *verified* one: live runs approved `Achilles Returns (2026)` as a
+  "Warner Bros. action film starring Brad Pitt", and attributed `Wildcat (2025)` to two
+  different directors on two runs. The failure is bounded — it now takes a specific
+  false claim rather than a generic "likely popular", which is a much rarer output, and
+  every approval is logged with its reason, so a confabulated one is visible after the
+  fact. Closing it properly means verifying the claim against an external film database
+  — the same out-of-scope fetch the no-year gap above needs.
+
+- **Verdicts are not fully reproducible.** `temperature=0.2`, and DeepSeek is not
+  deterministic even at 0: measured 43/46 titles identical across three runs at 0.2 vs
+  44/46 at 0.0, so the temperature was left alone rather than changed for no real gain.
+  Borderline titles can flip between runs. Low impact — the first real verdict is cached
+  per `dedup_key`, so a title is only ever judged once.
 
 - **`ensure-space` can no-op under lock contention (low impact).** If the 2-hour cron
   `monitor` holds `.manager.lock` exactly when an autorss run spawns `ensure-space`,

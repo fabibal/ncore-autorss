@@ -33,8 +33,9 @@ binary is `/usr/bin/docker` (to reach qB) plus `curl` *inside* the container.
   - `monitor` (default): `fetch_auto_torrents` → `update_zero_timers` →
     `reconcile_state` (downloaded→removed when gone from qB) → `compute_metrics` →
     `write_metrics` → `update_films_panel`. Never deletes.
-  - `ensure-space [CAP_GB]`: delete completed 0-peer seeders (longest-at-0-peers,
-    largest-first) until the category's committed size is back under CAP_GB.
+  - `ensure-space [CAP_GB]`: delete completed 0-peer seeders — the smallest single one
+    covering the overage, else smallest-first — until the category's committed size is
+    back under CAP_GB.
   - Accumulators: `accumulate_uploaded` / `accumulate_downloaded` (via `_accumulate`)
     maintain monotonic, deletion-safe byte counters in `manager-state.json`.
 - **`autorss_common.py`**: `BASE_DIR`/paths, qB constants, `docker_curl`,

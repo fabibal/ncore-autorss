@@ -13,7 +13,9 @@ Covers:
   - flock_or_exit actually HOLDS the lock while the fd is referenced (finding #1).
   - mutate_state locked read-modify-write -> no lost updates (finding #4).
   - ensure_space deletes only completed 0-peer seeders, never an in-progress
-    download or a torrent with peers (finding #3).
+    download or a torrent with peers (finding #3), and picks the SMALLEST SUFFICIENT
+    victim rather than the one dead longest (replaying the three real 2026-08-02
+    deletions, where the old rule freed up to 19x the actual overage).
   - torrent_size / category_used_bytes use committed size, not partial bytes (#5).
   - accumulate_uploaded monotonic + deletion-safe upload counter (dashboard panels).
   - env_value() exact-match preference, qb_add no-auto-stop flags, add-attempt cap.
@@ -22,7 +24,9 @@ Covers:
     film share one seen/decided entry instead of costing a redundant Deepseek call.
   - SYS_PROMPT policy: streaming-exclusive titles are not penalised vs theatrical,
     sports/non-film content stays excluded, and a title with no release year is
-    judged from the model's own knowledge instead of defaulting to "old".
+    judged from the model's own knowledge instead of defaulting to "old"; approval
+    requires RECOGNISING the title (and naming what by), never inferring popularity
+    from a recent release year.
   - ask_deepseek() surfaces the HTTP error body so a recurring failure is diagnosable.
   - decide-attempt cap: a title whose Deepseek call keeps failing is retried a bounded
     number of times then marked decide_failed, never looped on forever.
@@ -170,7 +174,13 @@ class TestSysPromptPolicy(unittest.TestCase):
     high-demand -- but sports broadcasts and other non-film content must stay
     excluded, and a title with no release year must be judged from the model's own
     knowledge rather than defaulting to "old" (root cause of the Night Patrol
-    rejected-then-approved inconsistency)."""
+    rejected-then-approved inconsistency).
+
+    The popularity half is RECOGNITION-gated: dropping the theatrical requirement left
+    the model inferring "highly anticipated" from the release year alone, which approved
+    a literal placeholder ("Untitled Home Invasion Romance (2025)") and an obscure
+    import ("Wu ming zhi bei Pi ji tai lai (2025)") and drove approvals to 87% of
+    recent-year titles."""
 
     def test_theatrical_release_not_required(self):
         p = autorss.SYS_PROMPT.lower()
@@ -193,6 +203,30 @@ class TestSysPromptPolicy(unittest.TestCase):
     def test_json_response_format_instruction_intact(self):
         # the {{"download": true, ...}} example must survive the .format() call unescaped
         self.assertIn('"download": true', autorss.SYS_PROMPT)
+
+    def test_popularity_requires_recognition_not_inference(self):
+        p = autorss.SYS_PROMPT.lower()
+        self.assertIn("recognition, never inference", p)
+        self.assertIn("says nothing about popularity", p)
+        self.assertIn("inferring from the title", p)
+
+    def test_approval_reason_must_name_the_recognised_fact(self):
+        """Self-enforcing: an approval has to cite cast/director/studio/franchise, so a
+        content-free "recognised mainstream film with buzz" verdict is a rejection."""
+        p = autorss.SYS_PROMPT.lower()
+        self.assertIn("the reason must name what you recognise the film by", p)
+        self.assertIn("never answer true with a reason that hedges", p)
+
+    def test_placeholder_titles_are_never_anticipated(self):
+        self.assertIn("'Untitled ...' are placeholders", autorss.SYS_PROMPT)
+
+    def test_recency_and_streaming_inclusiveness_survive_the_tightening(self):
+        # the tightening is on the popularity half ONLY -- recency, channel-neutrality
+        # and eligibility of titles postdating the model's knowledge must stay intact
+        p = autorss.SYS_PROMPT.lower()
+        self.assertIn("within the last 12 months", p)
+        self.assertIn("streaming-exclusive", p)
+        self.assertIn("announced or upcoming project", p)
 
 
 class TestAskDeepseekErrorDiagnosable(unittest.TestCase):
@@ -399,6 +433,114 @@ class TestEnsureSpaceSafety(unittest.TestCase):
         st = {"zero_since": {}}
         tm.ensure_space(500.0, [_seed("dead", 100 * 10 ** 9)], st)
         self.assertEqual(self.deleted, [])
+
+
+# Candidate sizes (GB) sampled from the live auto-film category on 2026-08-04.
+POOL_GB = [1.07, 1.50, 1.61, 1.80, 3.00, 3.32, 3.82, 6.89, 7.51, 8.45, 24.95]
+# The three real deletions of 2026-08-02: (name, overage GB, GB the OLD rule actually freed).
+HISTORICAL = [
+    ("Billy.Idol.Should.Be.Dead", 2.9, 6.89),
+    ("Night.Patrol", 1.5, 7.51),
+    ("Silent.Rebellion", 0.2, 3.82),
+]
+
+
+class TestEnsureSpaceSmallestSufficient(unittest.TestCase):
+    """Victim selection is SMALLEST SUFFICIENT, not longest-at-0-peers.
+
+    The old rule deleted whichever dead seeder had been at 0 peers longest -- a quantity
+    uncorrelated with the overage -- so it routinely freed far more than needed (live, a
+    0.2 GB overage cost a 3.82 GB seeder). Now the smallest single candidate that covers
+    the overage is taken; only when no single one covers it are candidates combined
+    smallest-first."""
+
+    def setUp(self):
+        self.real_delete = tm.delete_torrent
+        self.deleted = []
+        self.fail_hashes = set()
+
+        def fake(t, st):
+            if t["hash"] in self.fail_hashes:
+                return False
+            self.deleted.append(t["hash"])
+            return True
+
+        tm.delete_torrent = fake
+
+    def tearDown(self):
+        tm.delete_torrent = self.real_delete
+
+    @staticmethod
+    def _pool(sizes_gb):
+        return [_seed("t%02d" % i, int(gb * 10 ** 9)) for i, gb in enumerate(sizes_gb)]
+
+    @staticmethod
+    def _cap_for(torrents, over_gb):
+        """Cap that puts the category exactly `over_gb` over. Returns (cap, real over),
+        where the real over is recomputed the way ensure_space does so the expectations
+        stay exact despite the GB<->byte float roundtrip."""
+        used = C.category_used_bytes(torrents)
+        cap_gb = (used - over_gb * 1e9) / 1e9
+        return cap_gb, used - int(cap_gb * 1e9)
+
+    def _freed(self, torrents):
+        by_hash = {t["hash"]: t for t in torrents}
+        return sum(tm.disk_bytes(by_hash[h]) for h in self.deleted)
+
+    def test_picks_smallest_single_candidate_that_covers_the_overage(self):
+        torrents = self._pool(POOL_GB)
+        cap, over = self._cap_for(torrents, 2.9)
+        tm.ensure_space(cap, torrents, {"zero_since": {}})
+        expected = min((t for t in torrents if tm.disk_bytes(t) >= over), key=tm.disk_bytes)
+        self.assertEqual(self.deleted, [expected["hash"]])
+        self.assertEqual(tm.disk_bytes(expected), 3 * 10 ** 9)  # 3.00 GB, not the 24.95 GB one
+
+    def test_historical_deletions_would_have_been_proportionate(self):
+        """Replay of the three 2026-08-02 events: one torrent each, still covering the
+        overage, and strictly cheaper than what the old rule actually deleted."""
+        for name, over_gb, old_freed_gb in HISTORICAL:
+            with self.subTest(name):
+                self.deleted = []
+                torrents = self._pool(POOL_GB)
+                cap, over = self._cap_for(torrents, over_gb)
+                tm.ensure_space(cap, torrents, {"zero_since": {}})
+                freed = self._freed(torrents)
+                self.assertEqual(len(self.deleted), 1, "one victim, not a cascade")
+                self.assertGreaterEqual(freed, over, "still gets back under the cap")
+                self.assertLess(freed, old_freed_gb * 1e9, "cheaper than the old rule")
+
+    def test_combines_smallest_first_when_no_single_candidate_covers(self):
+        torrents = self._pool([1.0, 2.0, 3.0])
+        cap, over = self._cap_for(torrents, 4.5)  # bigger than any one candidate
+        tm.ensure_space(cap, torrents, {"zero_since": {}})
+        self.assertEqual(self.deleted, ["t00", "t01", "t02"])
+        self.assertGreaterEqual(self._freed(torrents), over)
+
+    def test_equal_sizes_tie_broken_by_longest_at_zero_peers(self):
+        """The replaced `-disk_bytes` tie-break was unreachable (zero_since floats never
+        tie). Byte sizes DO tie exactly, so time-at-0-peers now works as the tie-break."""
+        torrents = self._pool([5.0, 5.0, 5.0])
+        cap, _ = self._cap_for(torrents, 1.0)
+        st = {"zero_since": {"t00": 3000.0, "t01": 1000.0, "t02": 2000.0}}
+        tm.ensure_space(cap, torrents, st)
+        self.assertEqual(self.deleted, ["t01"])  # dead longest among the equal-size three
+
+    def test_failed_delete_falls_through_to_the_next_candidate(self):
+        torrents = self._pool(POOL_GB)
+        cap, over = self._cap_for(torrents, 2.9)
+        self.fail_hashes = {"t04"}  # the 3.00 GB smallest-sufficient pick fails
+        tm.ensure_space(cap, torrents, {"zero_since": {}})
+        self.assertTrue(self.deleted, "a failed delete must not abort the trim")
+        self.assertGreaterEqual(self._freed(torrents), over)
+
+    def test_never_selects_a_torrent_with_peers_or_an_incomplete_download(self):
+        torrents = self._pool([9.0]) + [
+            _seed("tiny_live", 1 * 10 ** 9, seeds=3),        # smallest, but has peers
+            _seed("tiny_dl", 1 * 10 ** 9, progress=0.5),     # smallest, but downloading
+        ]
+        cap, _ = self._cap_for(torrents, 0.5)
+        tm.ensure_space(cap, torrents, {"zero_since": {}})
+        self.assertEqual(self.deleted, ["t00"])
 
 
 class TestTorrentSize(unittest.TestCase):

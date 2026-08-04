@@ -31,14 +31,31 @@ craters `time`/`seedsize`/`skala_torrszam`. Instead we bound the auto-film
 category's own committed size (`CATEGORY_HARD_GB`/`CATEGORY_CAP_GB`) and **prefer
 holding the queue over deleting**. Deletion is a genuine last resort.
 
-## Deletion: only completed 0-peer seeders, largest-first
+## Deletion: only completed 0-peer seeders, smallest sufficient
 
 `ensure_space` candidates are `peers==0 AND progress>=1.0` only — never an
 in-progress download (would discard partial data and waste the slot) and never a
-torrent with peers. Largest-first within the 0-peer set frees the deficit while
-removing the **fewest** torrents, best preserving the `skala_torrszam` count tier.
-Its domain (completed seeders) is disjoint from the queue gate's (incomplete
-downloads), so the two predicates can't disagree about the same torrent.
+torrent with peers. Its domain (completed seeders) is disjoint from the queue gate's
+(incomplete downloads), so the two predicates can't disagree about the same torrent.
+
+Among those candidates we take the **smallest single one that covers the overage**;
+only if no single candidate covers it do we combine smallest-first. Removing one
+torrent preserves the `skala_torrszam` count tier exactly as well as the largest-first
+rule this replaced, but destroys far less accrued `time`/`seedsize`.
+
+Two earlier rules were wrong here. The doc used to claim largest-first while the code
+actually sorted by *longest at 0 peers* — a quantity uncorrelated with the overage,
+so it consistently over-freed: across the three real deletions of 2026-08-02 it took
+6.89/7.51/3.82 GB to cover overages of 2.9/1.5/0.2 GB (up to **19x**), and the next
+victim in line was the category's oldest and second-largest contributor (46 d seeding,
+121 GB uploaded, ratio 4.85) for a ~3 GB overage. Replayed against the same candidate
+pools, smallest-sufficient would have freed 3.00/1.50/1.07 GB — one torrent each.
+
+The old `-disk_bytes` tie-break under that key was unreachable dead code: `zero_since`
+holds a per-torrent `time.time()` float, so even torrents that hit 0 peers in the same
+sampling run differ by microseconds (measured: 7 torrents spread over 42 µs) and the
+primary key never tied. Time-at-0-peers is now the *secondary* key, where it does fire —
+byte sizes tie exactly.
 
 ## Never auto-stop seeding (`ratioLimit=-1`, `seedingTimeLimit=-1`)
 
@@ -104,6 +121,26 @@ popular as theatrical films, and the old wording caused real false positives
 (a Netflix-exclusive sequel was approved on the false claim of a "theatrical
 release") without protecting against anything -- the sports/TV/documentary/
 low-budget exclusions do the actual filtering work.
+
+Dropping it did, however, remove an accidental brake. With no channel test left, the
+model started inferring "highly anticipated" from the **release year alone**: approvals
+of recent-year titles went 66% -> 87% and weekly acquisitions 13-16 -> 27, which is
+what first pushed the category into the 480 GB trim threshold. The failures were
+unmistakable -- a literal placeholder, `Untitled Home Invasion Romance (2025)`, was
+approved as "likely popular and recent", and an obscure import,
+`Wu ming zhi bei Pi ji tai lai (2025)`, as "highly anticipated".
+
+So criterion (a) is now **recognition-gated**: an approval must name what the model
+recognises the film by (cast, director, studio, or franchise), which makes the claim
+self-checking -- a content-free "recognised mainstream film with buzz" is a rejection.
+Two counterweights keep this from swallowing the recency fix: a film known only as an
+*announced or upcoming* project still counts as recognised, and the model is told the
+release exists (it came off the tracker) so it must not reject merely because the title
+postdates its knowledge. Both were needed -- without them the gate collapsed to 4-9%
+approval and threw out genuinely mainstream titles (`Soulm8te`, `The Death of Robin
+Hood`). Measured live over the 46 post-deploy verdicts: 59% -> 22-24% approval, with
+`Avatar Aang`, `Soulm8te`, `The Death of Robin Hood` and `Storm on Sesame Street` still
+approved and both named false positives rejected.
 
 When `clean_title` finds no release year (a real, common scene-naming gap, not
 just the numeric-title case below), `ask_deepseek` gets no date to check against.
