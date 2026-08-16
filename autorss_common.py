@@ -37,7 +37,7 @@ MAX_DECIDE_ATTEMPTS = 5   # give up asking Deepseek after this many failed calls
 
 DL_STOPPED = {"stoppedDL", "pausedDL", "error", "missingFiles"}
 UP_STOPPED = {"stoppedUP", "pausedUP", "error", "missingFiles"}
-STALL_TIMEOUT_S = 6 * 3600  # a peerless download stalled this long no longer counts as active
+STALL_TIMEOUT_S = 6 * 3600  # a download going nowhere this long no longer counts as active
 
 
 # --- generic helpers --------------------------------------------------------
@@ -174,15 +174,42 @@ def category_used_bytes(torrents):
     return sum(torrent_size(t) for t in torrents or [])
 
 
-def is_active_download(t):
-    """True if an auto-film torrent genuinely occupies the single download slot:
-    incomplete, not stopped/paused/errored, and not a dead peerless stall.
+def dead_swarm(t):
+    """True if the swarm cannot finish this torrent: no peer holds a complete copy AND
+    the connected peers' pieces don't cover the file between them either.
 
-    SINGLE definition used by both the autorss queue gate and the dashboard metric."""
+    `num_complete` is the tracker's swarm-wide count of complete copies. qB reports -1
+    when it has not heard back from the tracker yet, so ONLY an explicit 0 counts --
+    a missing or -1 value means "unknown", never "dead". Guessing dead on unknown would
+    abandon a perfectly healthy download that simply hasn't announced yet.
+
+    `availability` is the fraction of the file reachable across connected peers. When it
+    is >= 1.0 the swarm collectively holds a full copy even with no single seeder, so
+    the torrent CAN still finish and is not dead. Only the sub-1.0 case is hopeless."""
+    return t.get("num_complete") == 0 and (t.get("availability") or 0) < 1.0
+
+
+def is_active_download(t):
+    """True if an auto-film torrent genuinely occupies a download slot: incomplete,
+    not stopped/paused/errored, and not a dead stall.
+
+    SINGLE definition used by both the autorss queue gate and the dashboard metric.
+
+    There are two ways to be a dead stall, and both require STALL_TIMEOUT_S of futility
+    first so a slow start is never mistaken for death:
+      - no connected peers at all; or
+      - peers are connected but the swarm has no complete copy between them
+        (added 2026-08-16).
+
+    The second rule exists because the first one missed the real case: a 0-progress
+    download held a slot for 13 DAYS with num_leechs=2, so `peers()` was 2 and the
+    peerless rule never fired -- while num_complete=0 and availability=0 meant not one
+    byte was ever obtainable. Fellow leechers who are equally stuck are not progress,
+    and a slot lost to a swarm with no seeder is lost permanently."""
     if (t.get("progress") or 0) >= 1.0:
         return False  # complete -> seeding, not downloading
     if t.get("state") in DL_STOPPED:
         return False  # stopped / paused / errored / missing files
-    if peers(t) == 0 and (t.get("time_active") or 0) > STALL_TIMEOUT_S:
-        return False  # long-stalled with no peers -> dead; must not freeze the queue
+    if (t.get("time_active") or 0) > STALL_TIMEOUT_S and (peers(t) == 0 or dead_swarm(t)):
+        return False  # long-stalled and going nowhere -> must not freeze the queue
     return True

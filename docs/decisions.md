@@ -57,6 +57,27 @@ sampling run differ by microseconds (measured: 7 torrents spread over 42 µs) an
 primary key never tied. Time-at-0-peers is now the *secondary* key, where it does fire —
 byte sizes tie exactly.
 
+## The trim runs every cycle, not only when a download is queued
+
+`autorss.py` spawns `ensure-space` right after the decision loop, **above** the
+`if not pending: return` / free-slot gates. It used to sit just above the add loop,
+which read naturally ("trim before adding") but made `CATEGORY_HARD_GB` enforceable
+only as a side effect of adding something.
+
+That is the wrong coupling, because the category grows on *completion*, not on add:
+a download that finishes pushes the category over the cap on a run that queues
+nothing. Live on 2026-08-16 the category sat at 483.3 GB against the 480 GB cap for
+26 h — a completed download had pushed it over, approvals then went quiet, and every
+run returned at "no pending downloads" without ever reaching the trim. The 2-hour
+`monitor` cron never deletes by design, so nothing else was watching. Hoisting the
+call restores the invariant the docs already claimed (the cap is a cap) and still
+trims before adding — nothing between the new position and the add loop grows the
+category. Cost is one extra no-op manager subprocess per quiet 15-minute run.
+
+Keeping `monitor` non-deleting was deliberate: it is the command a human runs by hand
+and the one autorss calls from a `finally`, so it must stay safe to invoke anywhere.
+`ensure-space` remains the single command that can delete.
+
 ## Never auto-stop seeding (`ratioLimit=-1`, `seedingTimeLimit=-1`)
 
 Set per-torrent on add (and back-filled onto existing torrents). A paused/stopped
@@ -69,6 +90,32 @@ ratio/seed-time cap would silently bleed score. `-1` = no limit, overriding glob
 `skala_torrszam` tiers sooner). Pending downloads are taken newest-approved first:
 hot releases peak in leechers in their first hours, maximising `up(interval)` and
 keeping `avg(torrdate)` fresh.
+
+## A download slot is freed by futility, not by loneliness
+
+`is_active_download` writes a download off as dead after `STALL_TIMEOUT_S` if it has
+no connected peers **or** its swarm holds no complete copy (`dead_swarm`:
+`num_complete == 0` and `availability < 1.0`).
+
+The peerless half alone was not enough. Live, `Storm.on.Sesame.Street.2026` held a
+slot for **13 days** at `progress=0` with `num_leechs=2` — so `peers()` was 2, the
+only stall rule never fired, and `num_complete=0`/`availability=0` meant not one byte
+was ever obtainable. Connected peers who are themselves stuck are not evidence of
+progress; the swarm simply had no seeder and never would. With `MAX_ACTIVE_DOWNLOADS=3`
+that is a third of the download capacity lost permanently, and it also charged the
+torrent's full `size` against the category cap while occupying no disk.
+
+Both halves require the timeout first, so a slow start is never mistaken for death.
+`num_complete` is only trusted when it is explicitly `0` — qB reports `-1` (or omits
+it) before the tracker answers, and treating "unknown" as "dead" would abandon healthy
+just-added downloads. `availability >= 1.0` also rescues the seederless-but-complete
+case, where connected peers collectively hold every piece and the torrent really can
+finish.
+
+The `autorss_stalled_downloads` gauge is now the exact complement (incomplete, not
+stopped, not active) rather than a separate `peers == 0` test. Under the old test the
+13-day stall reported `stalled=0` while genuinely holding a slot — the gauge disagreed
+with the gate it was supposed to describe.
 
 ## seen_clean / decided exclude skipped & removed
 

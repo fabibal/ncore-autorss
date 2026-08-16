@@ -24,9 +24,10 @@ binary is `/usr/bin/docker` (to reach qB) plus `curl` *inside* the container.
 
 - **`autorss.py`** (`_run`): read keys → write `last_run_ts` → fetch RSS
   (`fetch_films`, keeps `[Film` items) → for each new torrent id: `clean_title`
-  dedup, remux/720p pre-filter, Deepseek (`ask_deepseek`, cached) → record verdict.
+  dedup, remux/720p pre-filter, Deepseek (`ask_deepseek`, cached) → record verdict →
+  spawn `ensure-space` (unconditionally, so the hard cap is enforced on quiet runs too).
   Download phase: compute free slots vs `MAX_ACTIVE_DOWNLOADS`, sort pending
-  newest-first, spawn `ensure-space`, hold if category over `CATEGORY_CAP_GB`, else
+  newest-first, hold if category over `CATEGORY_CAP_GB`, else
   `qb_add_confirmed` each. `main()` holds the `.lock` flock for the whole run and
   always refreshes metrics in `finally` (`torrent-manager.py monitor`).
 - **`torrent-manager.py`**
@@ -40,7 +41,8 @@ binary is `/usr/bin/docker` (to reach qB) plus `curl` *inside* the container.
     maintain monotonic, deletion-safe byte counters in `manager-state.json`.
 - **`autorss_common.py`**: `BASE_DIR`/paths, qB constants, `docker_curl`,
   `qb_torrents`, `peers`, `torrent_size`/`category_used_bytes` (committed size),
-  `is_active_download` (the single queue-gate ⇆ metric predicate), `flock_or_exit`,
+  `dead_swarm` (no complete copy reachable), `is_active_download` (the single
+  queue-gate ⇆ metric predicate), `flock_or_exit`,
   `mutate_state` (locked state RMW), `env_value`.
 
 ## Film state machine (`state.json` → `films[<torrent_id>]`)
@@ -81,8 +83,9 @@ no deletion. `480–500`: trim completed 0-peer seeders toward 480. `> CATEGORY_
 0   */2 * * * /usr/bin/python3 /home/fbazsa/ncore-autorss/torrent-manager.py monitor >> .../torrent-manager-cron.log 2>&1
 ```
 
-`autorss.py` also invokes the manager twice per run: `ensure-space` before adding,
-and `monitor` in its `finally`. Manager runs self-exclude via `.manager.lock`.
+`autorss.py` also invokes the manager twice per run: `ensure-space` after the decision
+loop (before the pending/slot gates, so a run with nothing to add still trims), and
+`monitor` in its `finally`. Manager runs self-exclude via `.manager.lock`.
 
 ## Metrics (Prometheus textfile collector)
 

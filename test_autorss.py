@@ -33,6 +33,7 @@ Covers:
 """
 import fcntl
 import importlib.util
+import inspect
 import io
 import logging
 import os
@@ -118,9 +119,18 @@ class TestCleanTitleVariants(unittest.TestCase):
         self.assertEqual(out, "Web.720p.x264")
 
 
-def _t(progress, state, seeds=0, leechs=0, time_active=60):
-    return {"progress": progress, "state": state, "num_seeds": seeds,
-            "num_leechs": leechs, "time_active": time_active}
+def _t(progress, state, seeds=0, leechs=0, time_active=60,
+       num_complete=None, availability=None):
+    t = {"progress": progress, "state": state, "num_seeds": seeds,
+         "num_leechs": leechs, "time_active": time_active}
+    # Set ONLY when explicitly given: an absent num_complete/availability is qB's
+    # "unknown", which dead_swarm must read as alive. Defaulting them to 0 here would
+    # silently mark every existing fixture as a dead swarm.
+    if num_complete is not None:
+        t["num_complete"] = num_complete
+    if availability is not None:
+        t["availability"] = availability
+    return t
 
 
 class TestActiveDownload(unittest.TestCase):
@@ -142,6 +152,99 @@ class TestActiveDownload(unittest.TestCase):
         # literally the same shared function -- they cannot disagree.
         self.assertIs(autorss.is_active_download, tm.is_active_download)
         self.assertIs(autorss.is_active_download, C.is_active_download)
+
+
+class TestDeadSwarm(unittest.TestCase):
+    """A download whose swarm holds no complete copy can never finish, so past the stall
+    timeout it must stop occupying a slot -- even though it has connected peers.
+
+    Live regression: `Storm.on.Sesame.Street.2026` sat at progress=0 for 13 DAYS with
+    num_leechs=2 (so peers() == 2 and the peerless rule never fired), num_complete=0 and
+    availability=0. It held 1 of MAX_ACTIVE_DOWNLOADS the entire time and the `stalled`
+    gauge read 0, so nothing surfaced it."""
+
+    def test_unknown_swarm_is_never_dead(self):
+        # qB reports -1 (or omits the field) before the tracker answers. Unknown must
+        # read as alive -- guessing dead would abandon healthy just-added downloads.
+        self.assertFalse(C.dead_swarm(_t(0.0, "downloading")))
+        self.assertFalse(C.dead_swarm(_t(0.0, "downloading", num_complete=-1)))
+        self.assertFalse(C.dead_swarm(_t(0.0, "downloading", num_complete=-1, availability=0)))
+
+    def test_seeded_swarm_is_not_dead(self):
+        self.assertFalse(C.dead_swarm(_t(0.5, "downloading", num_complete=3, availability=0.4)))
+
+    def test_seederless_but_complete_between_peers_is_not_dead(self):
+        # No single seeder, but the connected peers' pieces cover the whole file, so it
+        # can still finish. Only the sub-1.0 case is hopeless.
+        self.assertFalse(C.dead_swarm(_t(0.5, "downloading", num_complete=0, availability=1.0)))
+        self.assertFalse(C.dead_swarm(_t(0.5, "downloading", num_complete=0, availability=2.7)))
+
+    def test_no_complete_copy_anywhere_is_dead(self):
+        self.assertTrue(C.dead_swarm(_t(0.0, "stalledDL", num_complete=0, availability=0)))
+        self.assertTrue(C.dead_swarm(_t(0.3, "downloading", num_complete=0, availability=0.9)))
+
+    def test_dead_swarm_frees_the_slot_only_after_the_timeout(self):
+        A = C.is_active_download
+        live = dict(progress=0.0, state="stalledDL", leechs=2, seeds=0,
+                    num_complete=0, availability=0)
+        self.assertTrue(A(_t(time_active=60, **live)),
+                        "a fresh dead-swarm download is just a slow start, not death")
+        self.assertTrue(A(_t(time_active=C.STALL_TIMEOUT_S, **live)),
+                        "boundary is strictly greater-than, matching the peerless rule")
+        self.assertFalse(A(_t(time_active=13 * 86400, **live)),
+                         "the live 13-day case: connected leechers, but nothing to get")
+
+    def test_peers_alone_no_longer_prove_liveness(self):
+        # The exact gap the old predicate had: peers() == 2 short-circuited the only
+        # stall rule, so this returned True forever.
+        old_rule_would_pass = C.peers(_t(0.0, "stalledDL", leechs=2)) != 0
+        self.assertTrue(old_rule_would_pass)
+        self.assertFalse(C.is_active_download(
+            _t(0.0, "stalledDL", leechs=2, time_active=13 * 86400,
+               num_complete=0, availability=0)))
+
+    def test_healthy_download_with_peers_stays_active_indefinitely(self):
+        self.assertTrue(C.is_active_download(
+            _t(0.5, "downloading", seeds=1, leechs=4, time_active=99 * 3600,
+               num_complete=2, availability=1.8)))
+
+
+class TestStalledMetricCountsDeadSwarm(unittest.TestCase):
+    """The gauge must agree with the queue gate. Under the old peers-only test a
+    dead-swarm stall that really was holding a slot still reported stalled=0."""
+
+    def setUp(self):
+        # compute_metrics reads state.json for the approved/rejected counts; keep the
+        # test off the live file.
+        self.real_load = C.load_json
+        C.load_json = lambda path, default=None: {"films": {}}
+
+    def tearDown(self):
+        C.load_json = self.real_load
+
+    def _metrics(self, torrents):
+        return tm.compute_metrics(torrents, {})
+
+    def test_dead_swarm_stall_is_counted(self):
+        dead = _t(0.0, "stalledDL", leechs=2, time_active=13 * 86400,
+                  num_complete=0, availability=0)
+        self.assertEqual(self._metrics([dead])["stalled"], 1)
+
+    def test_active_and_stalled_are_disjoint(self):
+        dead = _t(0.0, "stalledDL", leechs=2, time_active=13 * 86400,
+                  num_complete=0, availability=0)
+        healthy = _t(0.4, "downloading", seeds=2, num_complete=5, availability=2.0)
+        seeding = _t(1.0, "stalledUP", seeds=1)
+        m = self._metrics([dead, healthy, seeding])
+        self.assertEqual(m["active"], 1, "only the healthy download occupies a slot")
+        self.assertEqual(m["stalled"], 1, "only the dead-swarm one is written off")
+        self.assertEqual(m["seeding"], 1)
+
+    def test_stopped_download_is_not_stalled(self):
+        # Deliberately stopped is not the same as dead; it was never in the running.
+        stopped = _t(0.2, "pausedDL", time_active=99 * 3600,
+                     num_complete=0, availability=0)
+        self.assertEqual(self._metrics([stopped])["stalled"], 0)
 
 
 class TestRemuxFilter(unittest.TestCase):
@@ -433,6 +536,43 @@ class TestEnsureSpaceSafety(unittest.TestCase):
         st = {"zero_since": {}}
         tm.ensure_space(500.0, [_seed("dead", 100 * 10 ** 9)], st)
         self.assertEqual(self.deleted, [])
+
+
+class TestEnsureSpaceReachableOnQuietRuns(unittest.TestCase):
+    """The hard-cap trim has to be reachable on EVERY cycle, not only on one that queues
+    a download.
+
+    It used to sit below the `if not pending: return` early exit, which made
+    CATEGORY_HARD_GB enforceable only as a side effect of adding. Live, that parked the
+    category at 483.3 GB against the 480 GB cap for 26 h: a completed download pushed it
+    over, approvals then went quiet, and every subsequent run returned at "no pending
+    downloads" without ever reaching the trim.
+
+    Ordering is the whole fix, so it is pinned structurally -- exercising it behaviourally
+    would mean standing up fakes for RSS, Deepseek, qB and subprocess just to observe the
+    order of two statements."""
+
+    def _src(self):
+        return inspect.getsource(autorss._run)
+
+    def test_trim_precedes_the_quiet_run_early_return(self):
+        src = self._src()
+        self.assertLess(
+            src.index('"ensure-space"'), src.index('"no pending downloads"'),
+            "ensure-space slipped back below the quiet-run early return; the hard cap "
+            "is only enforced on runs that queue a download again")
+
+    def test_trim_still_precedes_the_add_path(self):
+        # The other half of the invariant: space must be freed BEFORE anything is queued,
+        # so the trim also has to stay above the soft-cap gate and the add loop.
+        src = self._src()
+        self.assertLess(src.index('"ensure-space"'), src.index("CATEGORY_CAP_GB"))
+
+    def test_trim_targets_the_hard_cap(self):
+        src = self._src()
+        trim = src.index('"ensure-space"')
+        self.assertIn("CATEGORY_HARD_GB", src[trim:trim + 200],
+                      "the trim must be invoked with the hard cap, not the soft one")
 
 
 # Candidate sizes (GB) sampled from the live auto-film category on 2026-08-04.

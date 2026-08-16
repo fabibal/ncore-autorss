@@ -413,6 +413,22 @@ def _run():
         log.info("DECISION%s | %r -> download=%s | reason=%r",
                  " (cached)" if cached else "", clean, decision, reason)
 
+    # Trim the auto-film category back under its hard cap. This deletes only completed
+    # 0-peer torrents and no-ops while the category is under CATEGORY_HARD_GB, so in
+    # normal operation it removes nothing.
+    #
+    # Runs BEFORE the pending/slots gates below (moved 2026-08-16), not after them.
+    # It used to sit just above the add loop, which made the hard cap enforceable ONLY
+    # on a run that actually queued a download: every quiet run returned at "no pending
+    # downloads" and never reached the trim. Live, that left the category parked at
+    # 483.3 GB against the 480 GB cap for 26 h -- a completed download had pushed it over
+    # and approvals then went quiet, so nothing came back to collect. Nothing between
+    # here and the add loop grows the category, so this is still "trim before adding".
+    try:
+        subprocess.run([sys.executable, MANAGER, "ensure-space", str(C.CATEGORY_HARD_GB)], timeout=300)
+    except Exception as e:
+        log.error("manager ensure-space failed: %s", e)
+
     # Download phase: keep up to MAX_ACTIVE_DOWNLOADS active auto-film downloads.
     pending = [fid for fid, v in state["films"].items() if v.get("status") == "pending"]
     if not pending:
@@ -434,14 +450,6 @@ def _run():
     # Newest-approved first: hot releases peak in leechers in their first hours, so
     # grabbing them early maximises up(interval) and keeps avg(torrdate) fresh.
     pending.sort(key=lambda fid: state["films"][fid].get("asked_ts", ""), reverse=True)
-
-    # Trim the auto-film category back under its hard cap before adding. This deletes
-    # only 0-peer torrents and no-ops while the category is under CATEGORY_HARD_GB, so
-    # in normal operation it removes nothing.
-    try:
-        subprocess.run([sys.executable, MANAGER, "ensure-space", str(C.CATEGORY_HARD_GB)], timeout=300)
-    except Exception as e:
-        log.error("manager ensure-space failed: %s", e)
 
     # Soft cap: if the category is still over CATEGORY_CAP_GB (0-peer deletion couldn't
     # bring it down -- everything has peers), HOLD rather than add more. Existing seeders

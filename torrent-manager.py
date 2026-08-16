@@ -237,9 +237,16 @@ def compute_metrics(torrents, st):
         "approved": sum(1 for f in films.values() if f.get("decision") is True),
         "rejected": sum(1 for f in films.values() if f.get("decision") is False),
         "active": sum(1 for t in torrents if is_active_download(t)),
+        # Incomplete, not deliberately stopped, and no longer counted as active -- i.e.
+        # exactly what is_active_download has written off as dead. Sharing that predicate
+        # instead of re-testing `peers(t) == 0` is what makes the gauge agree with the
+        # queue gate: a 13-day dead-swarm stall that was really holding a slot still
+        # reported stalled=0 under the old peers-only test, because it had 2 connected
+        # (equally stuck) leechers.
         "stalled": sum(1 for t in torrents
                        if (t.get("progress") or 0) < 1.0
-                       and t.get("state") not in C.DL_STOPPED and peers(t) == 0),
+                       and t.get("state") not in C.DL_STOPPED
+                       and not is_active_download(t)),
         "seeding": sum(1 for t in torrents
                        if (t.get("progress") or 0) >= 1.0 and t.get("state") not in C.UP_STOPPED),
         "disk_gb": sum(disk_bytes(t) for t in torrents) / 1e9,
@@ -277,7 +284,7 @@ def write_metrics(m):
         "# HELP autorss_peers_zero_total Current auto-film torrents with 0 connected peers",
         "# TYPE autorss_peers_zero_total gauge",
         "autorss_peers_zero_total %d" % m["peers_zero"],
-        "# HELP autorss_stalled_downloads Incomplete auto-film torrents stalled with 0 peers",
+        "# HELP autorss_stalled_downloads Incomplete auto-film torrents written off as dead (no peers, or no complete copy in the swarm)",
         "# TYPE autorss_stalled_downloads gauge",
         "autorss_stalled_downloads %d" % m["stalled"],
         "",

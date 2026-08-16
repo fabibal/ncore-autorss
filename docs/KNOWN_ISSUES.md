@@ -75,7 +75,19 @@ behaviour, in `docs/decisions.md`.
 - **`peers()` counts connected peers, not swarm size.** `num_seeds + num_leechs` is
   connections we currently hold; a torrent with a large swarm but no live connections
   (just added, firewalled moment) reads as 0-peer, which can briefly affect its
-  `zero_since` timer and deletion candidacy. Self-corrects on the next sample.
+  `zero_since` timer and deletion candidacy. Self-corrects on the next sample. The
+  converse error — connected peers being mistaken for *progress* — no longer keeps a
+  download slot occupied: `is_active_download` also writes off a stalled download whose
+  swarm holds no complete copy (see `dead_swarm` in `docs/decisions.md`).
+
+- **`dead_swarm` trusts the tracker's `num_complete`.** A swarm where every seeder is
+  merely offline at sampling time (rather than absent) reports the same `num_complete=0`
+  as a genuinely dead one. The `STALL_TIMEOUT_S` guard makes this unlikely — the
+  condition must hold continuously past the timeout, and `availability >= 1.0` rescues
+  the seederless-but-complete case — but a long-idle swarm that later revives can be
+  released from its slot early. Impact is bounded and self-correcting: nothing is
+  deleted, the torrent stays in qB and keeps downloading if it ever can; it just stops
+  *reserving* one of `MAX_ACTIVE_DOWNLOADS`, which is the conservative direction.
 
 - **External-dependency risk.** Approvals depend on the Deepseek API being reachable
   and the model's recency knowledge; misclassifications and transient API failures are
