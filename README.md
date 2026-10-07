@@ -26,7 +26,7 @@ high-demand torrents seeding uninterrupted, and treat deletion as a last resort.
 - **qBittorrent** runs in a Docker container with localhost-auth-bypass; host
   requests get 403 through Docker NAT, so all API calls go via
   `docker exec qbittorrent curl ...` (see `autorss_common.docker_curl`).
-- **Filtering**: remux/full-disc and non-720p releases are skipped before Deepseek;
+- **Filtering**: remux/full-disc, 2160p/SD and 1080p releases that have a 720p variant in the feed are skipped before Deepseek;
   a per-film clean-title key dedups quality variants and caches the Deepseek verdict.
 - **Concurrency**: up to `MAX_ACTIVE_DOWNLOADS` parallel downloads; newest-approved
   first to catch peak leecher demand.

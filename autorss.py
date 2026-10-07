@@ -83,8 +83,10 @@ REMUX_RE = re.compile(
     r"\b(remux|bd25|bd50|bdmv|disc|fullbd)\b|complete\.bluray", re.I
 )
 
-# Only auto-seed 720p releases. Titles without a 720p token (incl. 1080p/2160p) are skipped.
+# Auto-seed 720p releases; a 1080p release is accepted only when no 720p release of the
+# same film is in the current feed. Anything else (2160p, SD, ...) is skipped.
 RES_720P_RE = re.compile(r"\b720p\b", re.I)
+RES_1080P_RE = re.compile(r"\b1080p\b", re.I)
 
 # Release/quality tokens stripped from titles that carry no usable year.
 QUALITY_RE = re.compile(
@@ -161,6 +163,13 @@ def seen_clean_titles(films):
     be picked up."""
     return {dedup_key(v["clean"]) for v in films.values()
             if v.get("clean") and v.get("status") in SEEN_STATUSES}
+
+
+def wanted_quality(title, feed_720p_keys):
+    """720p always; 1080p only if the film has no 720p release in the current feed."""
+    if RES_720P_RE.search(title):
+        return True
+    return bool(RES_1080P_RE.search(title)) and dedup_key(clean_title(title)) not in feed_720p_keys
 
 
 def fetch_films(rss_key):
@@ -366,6 +375,8 @@ def _run():
     }
     # Films with a final disposition -> don't reprocess another release of the same film.
     seen_clean = seen_clean_titles(state["films"])
+    feed_720p_keys = {dedup_key(clean_title(f["title"])) for f in films
+                      if RES_720P_RE.search(f["title"]) and not REMUX_RE.search(f["title"])}
     for f in new:
         clean = clean_title(f["title"])
         key = dedup_key(clean)
@@ -379,12 +390,12 @@ def _run():
             state = C.mutate_state(lambda s, fid=f["id"], r=rec: s["films"].__setitem__(fid, r))
             log.info("SKIP | %r | reason=remux/full disc filter", f["title"])
             continue
-        if not RES_720P_RE.search(f["title"]):
+        if not wanted_quality(f["title"], feed_720p_keys):
             rec = {"title": f["title"], "clean": clean, "decision": False,
-                   "reason": "quality filter (720p only)", "status": "skipped",
+                   "reason": "quality filter (720p, or 1080p without a 720p variant)", "status": "skipped",
                    "link": f["link"], "asked_ts": now()}
             state = C.mutate_state(lambda s, fid=f["id"], r=rec: s["films"].__setitem__(fid, r))
-            log.info("SKIP | %r | reason=quality filter (720p only)", f["title"])
+            log.info("SKIP | %r | reason=quality filter (720p, or 1080p without a 720p variant)", f["title"])
             continue
         cached = key in decided
         if cached:

@@ -198,9 +198,13 @@ title (e.g. a well-known franchise sequel), but NOT the case where it doesn't
 confidently know the specific title -- that's a model-knowledge gap no prompt
 wording can close, not a fixable bias. See KNOWN_ISSUES.md.
 
-## 720p-only filter (open tradeoff)
+## 720p preferred, 1080p as fallback
 
-`RES_720P_RE` keeps only 720p releases. This maximises torrent count per GB (favours
-`skala_torrszam`) at the cost of per-torrent `seedsize`/`up`. Whether to allow 1080p
-depends on whether the count tier or seedsize is the binding lever at the current
-torrent count + free disk — deliberately left as a tunable decision, not yet changed.
+`wanted_quality` keeps 720p releases, and 1080p ones only when no 720p release of the
+same film (by `dedup_key`) is in the current RSS feed. 720p maximises torrent count per
+GB (favours `skala_torrszam`); at the disk cap a 1080p roughly halves the count and
+drops the tier, so it is only taken when it is the sole variant, which widens the pool
+of fresh films without costing count on films that have a 720p. 2160p stays excluded.
+Only new feed items are evaluated; earlier quality-skipped 1080p items are not
+revisited. A 720p variant that appears in a later run is blocked by `seen_clean` once
+its 1080p sibling was approved.

@@ -271,6 +271,22 @@ class TestRemuxFilter(unittest.TestCase):
             self.assertFalse(R.search(raw), msg=raw)
 
 
+class TestWantedQuality(unittest.TestCase):
+    def test_720p_always_wanted(self):
+        self.assertTrue(autorss.wanted_quality("A.Film.2026.720p.WEB-DL [Film (ENG HD)]", set()))
+
+    def test_1080p_wanted_only_without_720p_sibling(self):
+        t = "A.Film.2026.1080p.WEB-DL.x264-GRP [Film (ENG HD)]"
+        key = autorss.dedup_key(autorss.clean_title(t))
+        self.assertTrue(autorss.wanted_quality(t, set()))
+        self.assertFalse(autorss.wanted_quality(t, {key}))
+
+    def test_2160p_and_sd_never_wanted(self):
+        for t in ["A.Film.2026.2160p.WEB-DL [Film (ENG HD)]",
+                  "A.Film.2026.WEB-DL.H.264 [Film (HUN SD)]"]:
+            self.assertFalse(autorss.wanted_quality(t, set()), msg=t)
+
+
 class TestSysPromptPolicy(unittest.TestCase):
     """The approval prompt must not require a theatrical release -- a streaming-
     exclusive title (e.g. a Netflix/Amazon original) can be just as mainstream and

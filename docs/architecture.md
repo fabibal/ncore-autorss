@@ -49,7 +49,7 @@ binary is `/usr/bin/docker` (to reach qB) plus `curl` *inside* the container.
 
 `pending` (Deepseek yes, not yet downloaded) → `downloaded` → `removed` (gone from
 qB; re-acquirable). Terminal/other: `rejected` (Deepseek no), `skipped` (remux or
-non-720p pre-filter — a different-quality variant may still qualify), `add_failed`
+quality pre-filter — a different-quality variant may still qualify), `add_failed`
 (unconfirmed after `MAX_ADD_ATTEMPTS`).
 
 - `SEEN_STATUSES = {pending, downloaded, rejected}` block reprocessing other releases
