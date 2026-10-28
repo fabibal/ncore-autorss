@@ -846,6 +846,17 @@ class TestQbAddNoAutostop(unittest.TestCase):
         self.assertIn("seedingTimeLimit=-1", captured["args"])
 
 
+    def test_202_async_add_is_accepted(self):
+        """Live regression: qB answered 202 {"pending_count":1} and the torrent WAS added."""
+        real = C.docker_curl
+        body = '{"added_torrent_ids":[],"failure_count":0,"pending_count":1,"success_count":0}'
+        C.docker_curl = lambda args, timeout=40: (0, body + "\n202", "")
+        try:
+            accepted, _ = autorss.qb_add("http://example/t.torrent")
+        finally:
+            C.docker_curl = real
+        self.assertTrue(accepted)
+
 class TestAddAttemptCap(unittest.TestCase):
     """Findings #9/#12: an unconfirmable add is retried a bounded number of times, then
     marked add_failed so a dead/duplicate URL isn't retried forever."""

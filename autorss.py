@@ -251,7 +251,8 @@ def qb_add(link):
     lines = out.splitlines()
     code = lines[-1].strip() if lines else ""
     body = "\n".join(lines[:-1]).strip()
-    accepted = rc == 0 and code == "200" and body.lower() != "fails."
+    # Newer qB answers 202 (async add, body has pending_count) instead of 200.
+    accepted = rc == 0 and code in ("200", "202") and body.lower() != "fails."
     return accepted, f"http={code} body={body!r} err={err.strip()[:80]}"
 
 
