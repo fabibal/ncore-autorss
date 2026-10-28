@@ -5,7 +5,8 @@ Modes:
   monitor                 (default; cron every 2h, and called by autorss after each run)
                           Sample peer counts, update 0-peer timers, write the Prometheus
                           textfile metrics, refresh the Grafana "recent films" text panel.
-                          Never deletes.
+                          Deletes only completed 0-peer torrents whose tracker has said
+                          "unregistered torrent" for UNREGISTERED_GRACE_S (24h).
   ensure-space [CAP_GB]   Called by autorss before adding a torrent. If the auto-film
                           CATEGORY's committed size exceeds CAP_GB, delete the SMALLEST
                           SUFFICIENT completed 0-peer seeders (smallest single candidate
@@ -78,6 +79,64 @@ def update_zero_timers(torrents, st):
     for h in list(zs):
         if h not in present:
             zs.pop(h, None)
+
+
+def tracker_unregistered(h):
+    """True if any tracker of torrent `h` answers "unregistered torrent" right now, False if
+    none does, None if qB could not be asked (callers must treat that as "no information")."""
+    rc, out, _ = docker_curl([C.QB_API + "/api/v2/torrents/trackers?hash=" + h])
+    if rc != 0:
+        return None
+    try:
+        trackers = json.loads(out or "[]")
+    except json.JSONDecodeError:
+        return None
+    return any("unregistered" in (tr.get("msg") or "").lower() for tr in trackers)
+
+
+def update_unregistered_timers(torrents, st, check=tracker_unregistered):
+    """Track when each completed torrent was first seen "unregistered" on its tracker;
+    clear the timer as soon as an announce stops saying so, so a transient tracker outage
+    never accumulates toward a removal. A failed lookup leaves the timer as it was."""
+    us = st.setdefault("unregistered_since", {})
+    present = set()
+    for t in torrents:
+        h = t.get("hash")
+        present.add(h)
+        if (t.get("progress") or 0) < 1.0:
+            us.pop(h, None)
+            continue
+        verdict = check(h)
+        if verdict is None:
+            continue
+        if verdict:
+            us.setdefault(h, time.time())
+        else:
+            us.pop(h, None)
+    for h in list(us):
+        if h not in present:
+            us.pop(h, None)
+
+
+def remove_unregistered(torrents, st, now=None):
+    """Delete completed 0-peer torrents the tracker has called "unregistered" for at least
+    UNREGISTERED_GRACE_S: nCore books no upload for them, so they only hold disk. Never
+    touches a torrent with peers or one still downloading. Returns the number deleted."""
+    us = st.get("unregistered_since", {})
+    now = time.time() if now is None else now
+    removed = 0
+    for t in torrents:
+        since = us.get(t.get("hash"))
+        if since is None or now - since < C.UNREGISTERED_GRACE_S:
+            continue
+        if peers(t) != 0 or (t.get("progress") or 0) < 1.0:
+            continue
+        log.info("UNREGISTERED | %r unregistered since %s", (t.get("name") or "")[:70],
+                 datetime.fromtimestamp(since).strftime("%Y-%m-%d %H:%M"))
+        if delete_torrent(t, st):
+            us.pop(t.get("hash"), None)
+            removed += 1
+    return removed
 
 
 def delete_torrent(t, st):
@@ -453,6 +512,14 @@ def main():
     # Only touch qB-derived state on a SUCCESSFUL read. On failure, leave the last
     # metrics file and timers untouched so a transient timeout doesn't collapse the
     # live gauges (disk/seeding) to zero and flap the dashboard.
+    if cmd == "monitor" and qb_ok:
+        update_unregistered_timers(torrents, st)
+        if remove_unregistered(torrents, st):
+            torrents = fetch_auto_torrents()
+            qb_ok = torrents is not None
+            if qb_ok:
+                update_zero_timers(torrents, st)
+
     if qb_ok:
         reconcile_state({t.get("hash") for t in torrents})
         m = compute_metrics(torrents, st)

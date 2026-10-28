@@ -38,6 +38,7 @@ MAX_DECIDE_ATTEMPTS = 5   # give up asking Deepseek after this many failed calls
 DL_STOPPED = {"stoppedDL", "pausedDL", "error", "missingFiles"}
 UP_STOPPED = {"stoppedUP", "pausedUP", "error", "missingFiles"}
 STALL_TIMEOUT_S = 6 * 3600  # a download going nowhere this long no longer counts as active
+UNREGISTERED_GRACE_S = 24 * 3600  # tracker must say "unregistered torrent" this long before monitor removes it
 
 
 # --- generic helpers --------------------------------------------------------

@@ -208,3 +208,17 @@ of fresh films without costing count on films that have a 720p. 2160p stays excl
 Only new feed items are evaluated; earlier quality-skipped 1080p items are not
 revisited. A 720p variant that appears in a later run is blocked by `seen_clean` once
 its 1080p sibling was approved.
+
+## Unregistered torrents are removed after 24h
+
+When nCore drops a torrent, the tracker answers `unregistered torrent` and books no
+upload for it, so it only holds disk (14 such torrents, 81 GB, were found 2026-10-28
+with 0 peers each). `torrent-manager.py monitor` now stamps each completed torrent
+whose tracker says so (`unregistered_since`, manager-state.json) and deletes it with its
+files once that has held for `UNREGISTERED_GRACE_S` (24h) and it has 0 peers.
+
+The timer clears the moment an announce stops saying "unregistered", and a failed
+tracker lookup leaves it untouched, so a transient nCore outage never adds up toward a
+deletion; 24h outlasts a day-long outage. The same rule as the space trim applies:
+never a torrent with peers or one still downloading. The old `t.ncore.pro` "Host not
+found" tracker error is NOT a trigger -- only the literal "unregistered" message is.

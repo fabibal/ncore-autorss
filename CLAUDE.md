@@ -35,6 +35,7 @@ requests get **403 through Docker NAT**, so every qB API call goes via
 | `MAX_ACTIVE_DOWNLOADS` | 3 | concurrent auto-film downloads |
 | `MAX_ADD_ATTEMPTS` | 5 | unconfirmed adds before `status=add_failed` |
 | `STALL_TIMEOUT_S` | 6h | peerless download past this = dead, frees a slot |
+| `UNREGISTERED_GRACE_S` | 24h | tracker says "unregistered torrent" this long -> `monitor` removes it |
 
 Disk policy bounds the **category's committed size**, not host free space; deletion
 is a last resort. Filter regexes, `MAX_YEAR`, and the status sets live in `autorss.py`.
@@ -43,7 +44,7 @@ is a last resort. Filter regexes, `MAX_YEAR`, and the status sets live in `autor
 
 ```bash
 python3 test_autorss.py                       # tests (stdlib, no deps)
-python3 torrent-manager.py monitor            # refresh metrics + Grafana panel (never deletes)
+python3 torrent-manager.py monitor            # refresh metrics + Grafana panel; removes 24h-unregistered 0-peer seeders
 python3 dryrun-ensure-space.py [CAP_GB ...]   # what a trim WOULD delete (read-only)
 python3 torrent-manager.py ensure-space 480   # manual trim to a cap (GB)
 python3 autorss.py                            # one pipeline run

@@ -35,6 +35,7 @@ import fcntl
 import importlib.util
 import inspect
 import io
+import json
 import logging
 import os
 import sys
@@ -845,7 +846,6 @@ class TestQbAddNoAutostop(unittest.TestCase):
         self.assertIn("ratioLimit=-1", captured["args"])
         self.assertIn("seedingTimeLimit=-1", captured["args"])
 
-
     def test_202_async_add_is_accepted(self):
         """Live regression: qB answered 202 {"pending_count":1} and the torrent WAS added."""
         real = C.docker_curl
@@ -856,6 +856,7 @@ class TestQbAddNoAutostop(unittest.TestCase):
         finally:
             C.docker_curl = real
         self.assertTrue(accepted)
+
 
 class TestAddAttemptCap(unittest.TestCase):
     """Findings #9/#12: an unconfirmable add is retried a bounded number of times, then
@@ -896,6 +897,78 @@ class TestFilmsMarkdown(unittest.TestCase):
         rows = [{"title": "X", "status": "approved", "reason": "r", "epoch": 0, "hash": "none"}]
         md = tm.films_markdown(rows, {})   # no stats for this hash -> blank cells
         self.assertIn("| X | approved | r |", md)
+
+
+class TestRemoveUnregistered(unittest.TestCase):
+    """A torrent the tracker calls "unregistered" earns no ERTEK, so monitor removes it --
+    but only after UNREGISTERED_GRACE_S, only when it is a completed 0-peer seeder, and a
+    recovered or unreadable tracker never counts toward the grace."""
+
+    def setUp(self):
+        self.real_delete = tm.delete_torrent
+        self.deleted = []
+        tm.delete_torrent = lambda t, st: (self.deleted.append(t["hash"]) or True)
+        self.t0 = 1_000_000.0
+
+    def tearDown(self):
+        tm.delete_torrent = self.real_delete
+
+    def _timers(self, verdicts, torrents, st):
+        tm.update_unregistered_timers(torrents, st, check=lambda h: verdicts[h])
+
+    def test_not_deleted_before_grace(self):
+        st = {"unregistered_since": {"a": self.t0}}
+        n = tm.remove_unregistered([_seed("a", 10 ** 9)], st, now=self.t0 + C.UNREGISTERED_GRACE_S - 1)
+        self.assertEqual((n, self.deleted), (0, []))
+
+    def test_deleted_after_grace(self):
+        st = {"unregistered_since": {"a": self.t0}}
+        n = tm.remove_unregistered([_seed("a", 10 ** 9)], st, now=self.t0 + C.UNREGISTERED_GRACE_S)
+        self.assertEqual((n, self.deleted), (1, ["a"]))
+        self.assertNotIn("a", st["unregistered_since"])
+
+    def test_torrent_with_peers_or_still_downloading_is_protected(self):
+        st = {"unregistered_since": {"peers": self.t0, "dl": self.t0}}
+        torrents = [_seed("peers", 10 ** 9, seeds=1), _seed("dl", 10 ** 9, progress=0.4)]
+        n = tm.remove_unregistered(torrents, st, now=self.t0 + 10 * C.UNREGISTERED_GRACE_S)
+        self.assertEqual((n, self.deleted), (0, []))
+
+    def test_timer_starts_once_and_is_not_reset_while_still_unregistered(self):
+        st = {}
+        self._timers({"a": True}, [_seed("a", 10 ** 9)], st)
+        first = st["unregistered_since"]["a"]
+        self._timers({"a": True}, [_seed("a", 10 ** 9)], st)
+        self.assertEqual(st["unregistered_since"]["a"], first)
+
+    def test_recovered_tracker_clears_timer(self):
+        st = {"unregistered_since": {"a": self.t0}}
+        self._timers({"a": False}, [_seed("a", 10 ** 9)], st)
+        self.assertNotIn("a", st["unregistered_since"])
+
+    def test_failed_lookup_changes_nothing(self):
+        st = {"unregistered_since": {"a": self.t0}}
+        self._timers({"a": None, "b": None}, [_seed("a", 10 ** 9), _seed("b", 10 ** 9)], st)
+        self.assertEqual(st["unregistered_since"], {"a": self.t0})
+
+    def test_departed_and_incomplete_torrents_are_dropped_from_timers(self):
+        st = {"unregistered_since": {"gone": self.t0, "dl": self.t0}}
+        self._timers({"dl": True}, [_seed("dl", 10 ** 9, progress=0.4)], st)
+        self.assertEqual(st["unregistered_since"], {})
+
+    def test_tracker_unregistered_reads_the_message(self):
+        real = tm.docker_curl
+        try:
+            tm.docker_curl = lambda a: (0, json.dumps(
+                [{"url": "** [DHT] **", "msg": ""}, {"url": "http://t", "msg": "err: Unregistered torrent"}]), "")
+            self.assertTrue(tm.tracker_unregistered("a"))
+            tm.docker_curl = lambda a: (0, json.dumps([{"url": "http://t", "msg": ""}]), "")
+            self.assertFalse(tm.tracker_unregistered("a"))
+            tm.docker_curl = lambda a: (1, "", "boom")
+            self.assertIsNone(tm.tracker_unregistered("a"))
+            tm.docker_curl = lambda a: (0, "not json", "")
+            self.assertIsNone(tm.tracker_unregistered("a"))
+        finally:
+            tm.docker_curl = real
 
 
 if __name__ == "__main__":
