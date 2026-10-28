@@ -18,6 +18,7 @@ STATE_LOCK_FILE = os.path.join(BASE_DIR, ".state.lock")  # shared across both sc
 PROJECT_ENV = os.path.join(BASE_DIR, ".env")          # NCORE_RSS_KEY, GRAFANA_*
 TRADING_ENV = "/home/fbazsa/trading_agent/.env"        # DEEPSEEK key
 TEXTFILE_DIR = "/home/fbazsa/monitoring/textfile_collector"
+GRAFANA_TOKEN_FILE = "/home/fbazsa/monitoring/grafana_sa_token"  # service-account token; preferred over the .env admin login
 
 DOCKER = "/usr/bin/docker"
 QB_CONTAINER = "qbittorrent"

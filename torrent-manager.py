@@ -421,6 +421,23 @@ def films_markdown(rows, stats=None):
     return "\n".join(out)
 
 
+def grafana_auth_header():
+    """`Authorization` value: the service-account token if its file is readable, else the
+    .env admin login (Basic), else None."""
+    try:
+        with open(C.GRAFANA_TOKEN_FILE) as f:
+            token = f.read().strip()
+    except OSError:
+        token = ""
+    if token:
+        return "Bearer " + token
+    user = C.env_value(C.PROJECT_ENV, "GRAFANA_USER")
+    pw = C.env_value(C.PROJECT_ENV, "GRAFANA_PASS")
+    if user and pw:
+        return "Basic " + base64.b64encode(("%s:%s" % (user, pw)).encode()).decode()
+    return None
+
+
 def update_films_panel(st, torrents=None):
     """Push the recent-films markdown into the Grafana text panel -- only when it
     changed (hash in manager-state), so there's no dashboard version spam."""
@@ -433,15 +450,14 @@ def update_films_panel(st, torrents=None):
     if st.get("films_panel_hash") == h:
         return
     base = C.env_value(C.PROJECT_ENV, "GRAFANA_URL")
-    user = C.env_value(C.PROJECT_ENV, "GRAFANA_USER")
-    pw = C.env_value(C.PROJECT_ENV, "GRAFANA_PASS")
-    if not (base and user and pw):
-        log.warning("films panel: Grafana creds missing in %s; skipping", C.PROJECT_ENV)
+    auth = grafana_auth_header()
+    if not (base and auth):
+        log.warning("films panel: Grafana URL/creds missing (%s, %s); skipping",
+                    C.PROJECT_ENV, C.GRAFANA_TOKEN_FILE)
         return
-    auth = base64.b64encode(("%s:%s" % (user, pw)).encode()).decode()
     try:
         req = urllib.request.Request(base + "/api/dashboards/uid/" + DASH_UID,
-                                     headers={"Authorization": "Basic " + auth})
+                                     headers={"Authorization": auth})
         d = json.loads(urllib.request.urlopen(req, timeout=20).read())
         dash = d["dashboard"]
         # Match the marker first; fall back to the title substring ONLY for a panel that
@@ -476,7 +492,7 @@ def update_films_panel(st, torrents=None):
         payload = json.dumps({"dashboard": dash, "overwrite": False,
                               "message": "autorss: refresh recent films"}).encode()
         preq = urllib.request.Request(base + "/api/dashboards/db", data=payload, method="POST",
-            headers={"Authorization": "Basic " + auth, "Content-Type": "application/json"})
+            headers={"Authorization": auth, "Content-Type": "application/json"})
         urllib.request.urlopen(preq, timeout=20).read()
         st["films_panel_hash"] = h
         log.info("films panel updated (%d rows)", len(recent_approved_films()))
@@ -496,6 +512,14 @@ def main():
     if qb_ok:
         update_zero_timers(torrents, st)
 
+    if cmd == "monitor" and qb_ok:
+        update_unregistered_timers(torrents, st)
+        if remove_unregistered(torrents, st):
+            torrents = fetch_auto_torrents()
+            qb_ok = torrents is not None
+            if qb_ok:
+                update_zero_timers(torrents, st)
+
     if cmd == "ensure-space":
         cap_gb = float(sys.argv[2]) if len(sys.argv) > 2 else C.CATEGORY_HARD_GB
         if qb_ok:
@@ -512,14 +536,6 @@ def main():
     # Only touch qB-derived state on a SUCCESSFUL read. On failure, leave the last
     # metrics file and timers untouched so a transient timeout doesn't collapse the
     # live gauges (disk/seeding) to zero and flap the dashboard.
-    if cmd == "monitor" and qb_ok:
-        update_unregistered_timers(torrents, st)
-        if remove_unregistered(torrents, st):
-            torrents = fetch_auto_torrents()
-            qb_ok = torrents is not None
-            if qb_ok:
-                update_zero_timers(torrents, st)
-
     if qb_ok:
         reconcile_state({t.get("hash") for t in torrents})
         m = compute_metrics(torrents, st)
