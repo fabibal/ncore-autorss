@@ -38,6 +38,7 @@ import io
 import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -47,6 +48,7 @@ import urllib.request
 sys.path.insert(0, "/home/fbazsa/ncore-autorss")
 import autorss
 import autorss_common as C
+import tmdb
 
 LOG = logging.getLogger("test_autorss")
 LOG.addHandler(logging.NullHandler())
@@ -969,6 +971,232 @@ class TestRemoveUnregistered(unittest.TestCase):
             self.assertIsNone(tm.tracker_unregistered("a"))
         finally:
             tm.docker_curl = real
+
+
+class TestTmdbMatching(unittest.TestCase):
+    """TMDB facts must come from the RIGHT film: same title, year within 1, and a bare
+    title only matches a recent namesake, never an old popular one."""
+    TODAY = tmdb.date(2026, 10, 30)
+
+    def test_norm_folds_accents_case_and_punctuation(self):
+        self.assertEqual(tmdb.norm("Párhuzamos történetek"), tmdb.norm("Parhuzamos tortenetek"))
+        self.assertEqual(tmdb.norm("Spider-Man: Brand New Day"), tmdb.norm("spider man brand new day"))
+
+    def test_split_clean(self):
+        self.assertEqual(tmdb.split_clean("Verity (2026)"), ("Verity", 2026))
+        self.assertEqual(tmdb.split_clean("Mocskos zsaruk"), ("Mocskos zsaruk", None))
+        self.assertEqual(tmdb.split_clean("Blade Runner 2049"), ("Blade Runner 2049", None))
+
+    def test_year_must_be_within_one(self):
+        res = [{"title": "Verity", "release_date": "2026-10-02", "popularity": 50}]
+        self.assertIsNotNone(tmdb.pick_match(res, "Verity", 2026, self.TODAY))
+        self.assertIsNotNone(tmdb.pick_match(res, "Verity", 2025, self.TODAY))   # festival / year skew
+        self.assertIsNone(tmdb.pick_match(res, "Verity", 2023, self.TODAY))
+
+    def test_different_title_never_matches(self):
+        res = [{"title": "Verity Falls", "release_date": "2026-10-02", "popularity": 90}]
+        self.assertIsNone(tmdb.pick_match(res, "Verity", 2026, self.TODAY))
+
+    def test_original_title_matches(self):
+        res = [{"title": "Kokuho", "original_title": "国宝 Kokuho", "release_date": "2025-06-06"},
+               {"title": "Other", "original_title": "Kokuho", "release_date": "2025-01-01", "popularity": 1}]
+        self.assertEqual(tmdb.pick_match(res, "Kokuho", 2025, self.TODAY)["title"], "Other")
+
+    def test_no_year_rejects_old_popular_namesake(self):
+        res = [{"title": "Momo", "release_date": "1986-01-01", "popularity": 99},
+               {"title": "Momo", "release_date": "2025-12-25", "popularity": 3}]
+        self.assertEqual(tmdb.pick_match(res, "Momo", None, self.TODAY)["release_date"], "2025-12-25")
+        self.assertIsNone(tmdb.pick_match(res[:1], "Momo", None, self.TODAY))
+
+    def test_highest_popularity_wins_among_survivors(self):
+        res = [{"title": "Dorothy", "release_date": "2026-03-01", "popularity": 2},
+               {"title": "Dorothy", "release_date": "2026-05-01", "popularity": 20}]
+        self.assertEqual(tmdb.pick_match(res, "Dorothy", 2026, self.TODAY)["popularity"], 20)
+
+    def test_result_without_release_date_is_ignored(self):
+        self.assertIsNone(tmdb.pick_match([{"title": "Verity", "popularity": 5}], "Verity", 2026, self.TODAY))
+
+    def test_available_date_is_earliest_digital_or_physical(self):
+        body = {"results": [
+            {"iso_3166_1": "US", "release_dates": [{"type": 3, "release_date": "2025-09-01T00:00:00.000Z"},
+                                                   {"type": 4, "release_date": "2025-11-07T00:00:00.000Z"}]},
+            {"iso_3166_1": "GB", "release_dates": [{"type": 5, "release_date": "2025-12-01T00:00:00.000Z"}]}]}
+        self.assertEqual(tmdb.parse_available_date(body), "2025-11-07")
+        self.assertIsNone(tmdb.parse_available_date({"results": [
+            {"release_dates": [{"type": 3, "release_date": "2025-09-01T00:00:00.000Z"}]}]}))
+        self.assertIsNone(tmdb.parse_available_date({}))
+
+
+class TestTmdbLookup(unittest.TestCase):
+    def setUp(self):
+        self.real_get = tmdb._get
+        self.calls = []
+
+    def tearDown(self):
+        tmdb._get = self.real_get
+
+    def _fake(self, search_by_lang, release_dates=None):
+        def fake(path, params, tok):
+            self.calls.append((path, params.get("language")))
+            if path == "/search/movie":
+                return {"results": search_by_lang.get(params["language"], [])}
+            return release_dates or {"results": []}
+        tmdb._get = fake
+
+    def test_falls_back_to_hungarian_and_returns_facts(self):
+        hit = {"id": 7, "title": "Párhuzamos történetek", "release_date": "2026-02-01",
+               "popularity": 12.5, "vote_count": 80, "vote_average": 6.8,
+               "original_language": "hu", "genre_ids": [18]}
+        self._fake({"en-US": [], "hu-HU": [hit]},
+                   {"results": [{"release_dates": [{"type": 4, "release_date": "2026-06-01T00:00:00.000Z"}]}]})
+        got = tmdb.lookup("Parhuzamos tortenetek (2026)", "tok", tmdb.date(2026, 10, 30))
+        self.assertEqual((got["id"], got["popularity"], got["available_date"]), (7, 12.5, "2026-06-01"))
+        self.assertEqual([c[1] for c in self.calls if c[0] == "/search/movie"], ["en-US", "hu-HU"])
+
+    def test_english_hit_skips_hungarian_search(self):
+        self._fake({"en-US": [{"id": 1, "title": "Verity", "release_date": "2026-10-02"}]})
+        self.assertEqual(tmdb.lookup("Verity (2026)", "tok", tmdb.date(2026, 10, 30))["id"], 1)
+        self.assertEqual([c[1] for c in self.calls if c[0] == "/search/movie"], ["en-US"])
+
+    def test_no_confident_match_is_none(self):
+        self._fake({"en-US": [{"id": 1, "title": "Something Else", "release_date": "2026-10-02"}]})
+        self.assertIsNone(tmdb.lookup("Verity (2026)", "tok", tmdb.date(2026, 10, 30)))
+
+    def test_network_error_propagates_not_none(self):
+        def boom(path, params, tok):
+            raise urllib.error.URLError("down")
+        tmdb._get = boom
+        with self.assertRaises(urllib.error.URLError):
+            tmdb.lookup("Verity (2026)", "tok")
+
+    def test_token_empty_without_env_entry(self):
+        real = C.env_value
+        C.env_value = lambda f, n: None
+        try:
+            self.assertEqual(tmdb.token(), "")
+        finally:
+            C.env_value = real
+
+
+class TestTmdbQualifies(unittest.TestCase):
+    """TMDB's word alone approves only a recent, popular, non-documentary film with some votes."""
+    TODAY = tmdb.date(2026, 10, 30)
+
+    def _facts(self, **kw):
+        base = {"available_date": "2026-10-06", "release_date": "2026-07-29", "popularity": 421.3,
+                "vote_count": 6332, "genre_ids": [28]}
+        base.update(kw)
+        return base
+
+    def test_popular_recent_film_qualifies_with_a_reason(self):
+        why = tmdb.qualifies(self._facts(), self.TODAY)
+        self.assertIn("popularity 421", why)
+
+    def test_no_match_means_no_approval(self):
+        self.assertIsNone(tmdb.qualifies(None, self.TODAY))
+
+    def test_below_popularity_or_votes_does_not_qualify(self):
+        self.assertIsNone(tmdb.qualifies(self._facts(popularity=C.TMDB_MIN_POPULARITY - 0.1), self.TODAY))
+        self.assertIsNone(tmdb.qualifies(self._facts(vote_count=C.TMDB_MIN_VOTES - 1), self.TODAY))
+        self.assertIsNotNone(tmdb.qualifies(self._facts(popularity=C.TMDB_MIN_POPULARITY,
+                                                        vote_count=C.TMDB_MIN_VOTES), self.TODAY))
+
+    def test_documentary_and_tv_movie_never_qualify(self):
+        self.assertIsNone(tmdb.qualifies(self._facts(genre_ids=[99]), self.TODAY))
+        self.assertIsNone(tmdb.qualifies(self._facts(genre_ids=[18, 10770]), self.TODAY))
+
+    def test_old_film_does_not_qualify(self):
+        self.assertIsNone(tmdb.qualifies(self._facts(available_date="2024-03-08", release_date="2024-03-08"),
+                                         self.TODAY))
+
+    def test_festival_premiere_with_recent_digital_release_qualifies(self):
+        # Frankenstein: premiered Aug 2025, digital Nov 2025 -> still fresh in Oct 2026
+        self.assertIsNotNone(tmdb.qualifies(self._facts(release_date="2025-08-30", available_date="2025-11-06"),
+                                            self.TODAY))
+
+
+class TestRunTmdbWiring(unittest.TestCase):
+    """_run: TMDB adds an approval to a Deepseek rejection, never overturns an approval,
+    and its failure leaves the Deepseek verdict untouched."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.saved = {n: getattr(C, n) for n in ("STATE_FILE", "STATE_LOCK_FILE", "env_value")}
+        self.saved_a = {n: getattr(autorss, n) for n in
+                        ("fetch_films", "ask_deepseek", "write_run_metrics", "qb_active_auto")}
+        self.saved_t = {n: getattr(tmdb, n) for n in ("token", "approval_reason")}
+        self.saved_run = subprocess.run
+        C.STATE_FILE = os.path.join(self.tmp, "state.json")
+        C.STATE_LOCK_FILE = os.path.join(self.tmp, ".state.lock")
+        C.env_value = lambda f, n: "x"
+        autorss.write_run_metrics = lambda meta: None
+        autorss.qb_active_auto = lambda: (-1, "stub")      # ends _run right after the decisions
+        subprocess.run = lambda *a, **k: None               # the ensure-space subprocess
+        self.deepseek = {}
+        autorss.ask_deepseek = lambda clean, key: self.deepseek[clean]
+        tmdb.token = lambda: "tok"
+        self.tmdb_calls = []
+
+    def tearDown(self):
+        for n, v in self.saved.items():
+            setattr(C, n, v)
+        for n, v in self.saved_a.items():
+            setattr(autorss, n, v)
+        for n, v in self.saved_t.items():
+            setattr(tmdb, n, v)
+        subprocess.run = self.saved_run
+
+    def _run(self, titles):
+        autorss.fetch_films = lambda key: (len(titles), [
+            {"id": str(i), "title": t, "link": "http://l/%d" % i} for i, t in enumerate(titles, 1)])
+        autorss._run()
+        return C.load_json(C.STATE_FILE, {})["films"]
+
+    def _tmdb(self, answer):
+        def fake(clean, tok):
+            self.tmdb_calls.append(clean)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        tmdb.approval_reason = fake
+
+    def test_tmdb_approves_a_title_deepseek_rejected(self):
+        self.deepseek["Verity (2026)"] = (False, "Unrecognised title")
+        self._tmdb("TMDB: popularity 197, 332 votes, available 2026-10-27")
+        f = self._run(["Verity.2026.720p.WEB-DL.H264-X [Film (HUN HD)]"])["1"]
+        self.assertEqual((f["decision"], f["status"]), (True, "pending"))
+        self.assertIn("TMDB", f["reason"])
+
+    def test_tmdb_not_consulted_when_deepseek_approves(self):
+        self.deepseek["Supergirl (2026)"] = (True, "DC franchise")
+        self._tmdb("should not be used")
+        f = self._run(["Supergirl.2026.720p.WEB-DL.H264-X [Film (ENG HD)]"])["1"]
+        self.assertEqual((f["decision"], f["reason"]), (True, "DC franchise"))
+        self.assertEqual(self.tmdb_calls, [])
+
+    def test_tmdb_says_no_keeps_the_rejection(self):
+        self.deepseek["Obscure (2026)"] = (False, "Unrecognised title")
+        self._tmdb(None)
+        f = self._run(["Obscure.2026.720p.WEB-DL.H264-X [Film (ENG HD)]"])["1"]
+        self.assertEqual((f["decision"], f["status"], f["reason"]), (False, "rejected", "Unrecognised title"))
+
+    def test_tmdb_failure_keeps_deepseek_verdict_and_is_not_retried_this_run(self):
+        self.deepseek["A One (2026)"] = (False, "no")
+        self.deepseek["B Two (2026)"] = (False, "no")
+        self._tmdb(urllib.error.URLError("down"))
+        films = self._run(["A.One.2026.720p.WEB-DL.H264-X [Film (ENG HD)]",
+                           "B.Two.2026.720p.WEB-DL.H264-X [Film (ENG HD)]"])
+        self.assertEqual([films[i]["status"] for i in ("1", "2")], ["rejected", "rejected"])
+        self.assertEqual(len(self.tmdb_calls), 1)       # second title skipped TMDB after the outage
+
+    def test_without_a_token_tmdb_is_never_called(self):
+        tmdb.token = lambda: ""
+        self.deepseek["Verity (2026)"] = (False, "Unrecognised title")
+        self._tmdb("TMDB: would approve")
+        f = self._run(["Verity.2026.720p.WEB-DL.H264-X [Film (HUN HD)]"])["1"]
+        self.assertEqual(f["status"], "rejected")
+        self.assertEqual(self.tmdb_calls, [])
+
 
 
 if __name__ == "__main__":

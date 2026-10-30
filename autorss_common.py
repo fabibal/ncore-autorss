@@ -39,6 +39,8 @@ MAX_DECIDE_ATTEMPTS = 5   # give up asking Deepseek after this many failed calls
 DL_STOPPED = {"stoppedDL", "pausedDL", "error", "missingFiles"}
 UP_STOPPED = {"stoppedUP", "pausedUP", "error", "missingFiles"}
 STALL_TIMEOUT_S = 6 * 3600  # a download going nowhere this long no longer counts as active
+TMDB_MIN_POPULARITY = 30.0  # TMDB popularity a film needs to be approved on TMDB's word alone
+TMDB_MIN_VOTES = 20         # ...with at least this many votes (a 1-vote popularity spike is noise)
 UNREGISTERED_GRACE_S = 24 * 3600  # tracker must say "unregistered torrent" this long before monitor removes it
 
 

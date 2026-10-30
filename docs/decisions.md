@@ -222,3 +222,30 @@ tracker lookup leaves it untouched, so a transient nCore outage never adds up to
 deletion; 24h outlasts a day-long outage. The same rule as the space trim applies:
 never a torrent with peers or one still downloading. The old `t.ncore.pro` "Host not
 found" tracker error is NOT a trigger -- only the literal "unregistered" message is.
+
+## TMDB adds approvals on top of Deepseek
+
+Deepseek decides from memory, so a film released after its training data is rejected as
+"unrecognised" however big it is (`Verity`, `Hope`, `Buddy` were all rejected that way
+in October). Approvals fell from ~10/week (Jul-Aug) to ~2/week from mid-September while
+the portfolio aged: 65 of 88 seeders are over 60 days old, and the youngest earn ~14x the
+upload per day of the oldest. `tmdb.py` looks the title up on TMDB and `qualifies` approves
+it when it became available within 12 months, is not a documentary/TV movie, and has
+popularity >= `TMDB_MIN_POPULARITY` with >= `TMDB_MIN_VOTES` votes.
+
+- **Adds only.** TMDB runs only after a Deepseek rejection and never overturns an
+  approval. Popularity alone is a middling predictor (Spearman 0.46 against upload/day;
+  the 422 GB uploader `Silent Friend` has popularity 6), and Deepseek's recognised
+  approvals include several low-popularity strong seeders. An OR keeps all of those.
+- **Threshold 30.** Replayed on 35 days of verdicts (`tmdb-replay.py`): popularity >= 30
+  adds ~6 films/week on top of Deepseek's ~2, close to the Jul-Aug rate that filled the
+  category; >= 10 would add ~10/week and push it into the trim.
+- **Date = digital/physical release**, not TMDB's primary date, which is often a festival
+  premiere: `Frankenstein` (Venice Aug 2025) and `Sentimental Value` (Cannes May 2025)
+  are top uploaders and a primary-date rule would have rejected both.
+- **Failure is "no information".** A TMDB network/HTTP error leaves the Deepseek verdict
+  and never touches `decide_attempts`; after the first failure TMDB is skipped for the
+  rest of that run so an outage costs one timeout, not one per film.
+- **Known limits.** A first-day rejection is permanent (`SEEN_STATUSES`), and a rising
+  film is not re-evaluated. Hungarian-titled releases without a year often do not match
+  (`Mocskos zsaruk`, `Parhuzamos tortenetek`), so they fall back to Deepseek alone.

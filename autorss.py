@@ -23,6 +23,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 import autorss_common as C
+import tmdb
 from autorss_common import is_active_download
 
 # --- config -----------------------------------------------------------------
@@ -338,6 +339,9 @@ def _run():
     if not rss_key:
         raise SystemExit("no NCORE_RSS_KEY in " + C.PROJECT_ENV)
 
+    tmdb_tok = tmdb.token()  # '' -> TMDB is off and Deepseek decides alone, as before
+    tmdb_down = False        # set on the first TMDB failure so one outage costs one timeout per run
+
     ts = int(time.time())
     state = C.mutate_state(lambda s: s["_meta"].update({"last_run_ts": ts}))
 
@@ -416,6 +420,18 @@ def _run():
                     log.error("deepseek error for %r (attempt %d/%d, will retry): %s",
                               clean, attempt_rec["decide_attempts"], C.MAX_DECIDE_ATTEMPTS, e)
                 continue
+            # TMDB only ever ADDS an approval to Deepseek's rejection (Deepseek rejects
+            # films it simply has never heard of). Its failure is "no information": the
+            # Deepseek verdict stands and nothing is counted against the film.
+            if not decision and tmdb_tok and not tmdb_down:
+                try:
+                    why = tmdb.approval_reason(clean, tmdb_tok)
+                except Exception as e:
+                    tmdb_down = True
+                    log.warning("TMDB lookup failed for %r; skipping TMDB for this run: %s", clean, e)
+                else:
+                    if why:
+                        decision, reason = True, why
             decided[key] = (decision, reason)
         rec = {"title": f["title"], "clean": clean, "decision": decision, "reason": reason,
                "status": "pending" if decision else "rejected",

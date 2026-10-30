@@ -18,3 +18,4 @@ manager-state.json
 # python
 __pycache__/
 *.pyc
+tmdb-cache.json

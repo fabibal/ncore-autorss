@@ -13,6 +13,9 @@ on the server via cron (no Docker compose of its own — it drives the existing
   sampling, metrics, state reconcile, Grafana panel, up/down accumulators.
   `ensure-space [CAP_GB]`: trim completed 0-peer seeders when the category is over cap.
   **Never deletes a torrent with peers or one still downloading.**
+- `tmdb.py` — TMDB lookup (needs `TMDB_READ_TOKEN` in `.env`; inert without it). Adds an
+  approval when Deepseek rejects a popular, recent film it never heard of.
+  `tmdb-replay.py` — read-only: caches TMDB facts for recent verdicts to calibrate it.
 - `autorss_common.py` — shared spine: constants, qB API via `docker exec`, flock,
   locked state I/O (`mutate_state`), `env_value`, the `is_active_download` predicate.
 - `dryrun-ensure-space.py` — read-only: prints the trim plan `ensure-space` would follow
@@ -35,6 +38,7 @@ requests get **403 through Docker NAT**, so every qB API call goes via
 | `MAX_ACTIVE_DOWNLOADS` | 3 | concurrent auto-film downloads |
 | `MAX_ADD_ATTEMPTS` | 5 | unconfirmed adds before `status=add_failed` |
 | `STALL_TIMEOUT_S` | 6h | peerless download past this = dead, frees a slot |
+| `TMDB_MIN_POPULARITY` / `TMDB_MIN_VOTES` | 30 / 20 | TMDB popularity+votes that approve a film Deepseek rejected |
 | `UNREGISTERED_GRACE_S` | 24h | tracker says "unregistered torrent" this long -> `monitor` removes it |
 
 Disk policy bounds the **category's committed size**, not host free space; deletion
