@@ -292,9 +292,40 @@ def accumulate_downloaded(torrents, st):
     return _accumulate(torrents, st, "downloaded", "down_seen", "downloaded_total")
 
 
+KINDS = ("film", "series")
+
+
+def approval_source(f):
+    """Who approved an approved film record: the series pilot, TMDB's word alone, or Deepseek."""
+    if f.get("kind") == "series":
+        return "series"
+    return "tmdb" if str(f.get("reason") or "").startswith("TMDB") else "deepseek"
+
+
+def split_by_kind(torrents, films):
+    """{'film': [...], 'series': [...]}: a torrent is a series episode iff its hash belongs
+    to a state record with kind=series; everything else counts as a film."""
+    series = {(f.get("hash") or "").lower() for f in films.values()
+              if f.get("kind") == "series" and f.get("hash")}
+    out = {k: [] for k in KINDS}
+    for t in torrents:
+        out["series" if (t.get("hash") or "").lower() in series else "film"].append(t)
+    return out
+
+
 def compute_metrics(torrents, st):
     films = C.load_json(C.STATE_FILE, {"films": {}}).get("films", {})
+    by_kind = split_by_kind(torrents, films)
     return {
+        "approvals": {src: sum(1 for f in films.values()
+                               if f.get("decision") is True and approval_source(f) == src)
+                      for src in ("deepseek", "tmdb", "series")},
+        "uploaded_by_kind": {k: _accumulate(by_kind[k], st, "uploaded", "up_seen_" + k, "uploaded_total_" + k)
+                             for k in KINDS},
+        "disk_by_kind": {k: sum(disk_bytes(t) for t in by_kind[k]) / 1e9 for k in KINDS},
+        "seeding_by_kind": {k: sum(1 for t in by_kind[k]
+                                   if (t.get("progress") or 0) >= 1.0 and t.get("state") not in C.UP_STOPPED)
+                            for k in KINDS},
         "approved": sum(1 for f in films.values()
                         if f.get("decision") is True and f.get("kind") != "series"),
         "rejected": sum(1 for f in films.values() if f.get("decision") is False),
@@ -343,6 +374,18 @@ def write_metrics(m):
         "# HELP autorss_deleted_total Cumulative torrents deleted by the manager",
         "# TYPE autorss_deleted_total counter",
         "autorss_deleted_total %d" % m["deleted"],
+        "# HELP autorss_approvals_total Cumulative approvals by source (deepseek, tmdb = TMDB's word alone, series = pilot)",
+        "# TYPE autorss_approvals_total counter",
+        *['autorss_approvals_total{source="%s"} %d' % (s, n) for s, n in m["approvals"].items()],
+        "# HELP autorss_uploaded_bytes_by_kind_total Cumulative bytes uploaded, split film / series (monotonic)",
+        "# TYPE autorss_uploaded_bytes_by_kind_total counter",
+        *['autorss_uploaded_bytes_by_kind_total{kind="%s"} %d' % (k, n) for k, n in m["uploaded_by_kind"].items()],
+        "# HELP autorss_disk_used_gb_by_kind Disk used by the auto-film category in GB, split film / series",
+        "# TYPE autorss_disk_used_gb_by_kind gauge",
+        *['autorss_disk_used_gb_by_kind{kind="%s"} %.3f' % (k, n) for k, n in m["disk_by_kind"].items()],
+        "# HELP autorss_seeding_by_kind Current seeding torrents, split film / series",
+        "# TYPE autorss_seeding_by_kind gauge",
+        *['autorss_seeding_by_kind{kind="%s"} %d' % (k, n) for k, n in m["seeding_by_kind"].items()],
         "# HELP autorss_peers_zero_total Current auto-film torrents with 0 connected peers",
         "# TYPE autorss_peers_zero_total gauge",
         "autorss_peers_zero_total %d" % m["peers_zero"],
@@ -375,6 +418,7 @@ def recent_approved_films(limit=50):
                 "title": f.get("clean") or f.get("title") or fid,
                 "status": "downloaded" if f.get("status") == "downloaded" else "approved",
                 "reason": f.get("reason", ""),
+                "source": approval_source(f),
                 "epoch": _epoch(f.get("added_ts") or f.get("asked_ts") or ""),
                 "hash": (f.get("hash") or "").lower(),
             })
@@ -383,15 +427,21 @@ def recent_approved_films(limit=50):
 
 
 def torrent_stats(torrents):
-    """Map hash -> seeding stats (days, uploaded GB, ratio) for live auto-film torrents."""
+    """Map hash -> stats (size, seeding days, uploaded GB, GB/day, ratio) for live auto-film
+    torrents. GB/day is blank (None) until a torrent has seeded half a day: a few hours of
+    upload divided by a tiny denominator would top the table for the wrong reason."""
     stats = {}
     for t in torrents or []:
         h = (t.get("hash") or "").lower()
         if not h:
             continue
+        seed_days = (t.get("seeding_time") or 0) / 86400.0
+        up_gb = (t.get("uploaded") or 0) / 1e9
         stats[h] = {
-            "seed_days": (t.get("seeding_time") or 0) / 86400.0,
-            "up_gb": (t.get("uploaded") or 0) / 1e9,
+            "size_gb": disk_bytes(t) / 1e9,
+            "seed_days": seed_days,
+            "up_gb": up_gb,
+            "per_day": up_gb / seed_days if seed_days >= 0.5 else None,
             "ratio": t.get("ratio") or 0.0,
         }
     return stats
@@ -411,16 +461,19 @@ def films_markdown(rows, stats=None):
     stats = stats or {}
     def esc(s):
         return str(s).replace("|", "\\|").replace("\n", " ")
-    out = ["| Title | Status | Reason | Added | Seeding (days) | Uploaded (GB) | Ratio |",
-           "|---|---|---|---|---|---|---|"]
+    out = ["| Title | Source | Status | Reason | Added | Size (GB) | Seeding (days) | Uploaded (GB) | GB/day | Ratio |",
+           "|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         when = datetime.fromtimestamp(r["epoch"]).strftime("%Y-%m-%d %H:%M") if r["epoch"] else ""
         s = stats.get(r.get("hash"))
+        size_gb = "%.1f" % s["size_gb"] if s else ""
         seed_days = "%.1f" % s["seed_days"] if s else ""
         up_gb = "%.2f" % s["up_gb"] if s else ""
+        per_day = "%.2f" % s["per_day"] if s and s.get("per_day") is not None else ""
         ratio = "%.2f" % s["ratio"] if s else ""
-        out.append("| %s | %s | %s | %s | %s | %s | %s |" % (
-            esc(r["title"]), esc(r["status"]), esc(r["reason"]), when, seed_days, up_gb, ratio))
+        out.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            esc(r["title"]), esc(r.get("source", "")), esc(r["status"]), esc(r["reason"]), when,
+            size_gb, seed_days, up_gb, per_day, ratio))
     return "\n".join(out)
 
 

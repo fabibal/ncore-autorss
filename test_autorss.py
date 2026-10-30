@@ -884,10 +884,13 @@ class TestAddAttemptCap(unittest.TestCase):
 class TestFilmsMarkdown(unittest.TestCase):
     def test_render_and_escape(self):
         rows = [{"title": "Dune | Part Two (2024)", "status": "downloaded",
-                 "reason": "Blockbuster", "epoch": 1718740800, "hash": "abc"}]
-        stats = {"abc": {"seed_days": 3.5, "up_gb": 12.0, "ratio": 2.0}}
+                 "reason": "Blockbuster", "source": "tmdb", "epoch": 1718740800, "hash": "abc"}]
+        stats = {"abc": {"size_gb": 4.5, "seed_days": 3.5, "up_gb": 12.0, "per_day": 3.43, "ratio": 2.0}}
         md = tm.films_markdown(rows, stats)
-        self.assertIn("| Title | Status | Reason | Added | Seeding (days) | Uploaded (GB) | Ratio |", md)
+        self.assertIn("| Title | Source | Status | Reason | Added | Size (GB) | Seeding (days) | Uploaded (GB) | GB/day | Ratio |", md)
+        self.assertIn("| tmdb |", md)     # source column
+        self.assertIn("4.5", md)         # size column
+        self.assertIn("3.43", md)        # upload per day column
         self.assertIn("Dune \\| Part Two (2024)", md)   # pipe escaped so the table isn't broken
         self.assertIn("downloaded", md)
         self.assertIn("3.5", md)        # seeding-stat columns rendered
@@ -898,7 +901,17 @@ class TestFilmsMarkdown(unittest.TestCase):
     def test_blank_stats_when_no_live_torrent(self):
         rows = [{"title": "X", "status": "approved", "reason": "r", "epoch": 0, "hash": "none"}]
         md = tm.films_markdown(rows, {})   # no stats for this hash -> blank cells
-        self.assertIn("| X | approved | r |", md)
+        self.assertIn("| X |  | approved | r |", md)
+
+
+class TestTorrentStatsPerDay(unittest.TestCase):
+    def test_per_day_is_upload_over_seeded_days_and_blank_when_too_young(self):
+        old = {"hash": "A", "size": 4 * 10 ** 9, "completed": 4 * 10 ** 9, "uploaded": 20 * 10 ** 9,
+               "seeding_time": 10 * 86400, "ratio": 5.0}
+        young = dict(old, hash="B", seeding_time=3600)
+        stats = tm.torrent_stats([old, young])
+        self.assertEqual((stats["a"]["size_gb"], stats["a"]["per_day"]), (4.0, 2.0))
+        self.assertIsNone(stats["b"]["per_day"])
 
 
 class TestRemoveUnregistered(unittest.TestCase):
@@ -1410,6 +1423,64 @@ class TestSeedObligation(unittest.TestCase):
         young["hash"] = "young"
         victims, _ = tm.select_victims([young, served], 10 ** 8, {}, 2_000_000_000.0)
         self.assertEqual([t["hash"] for t in victims], ["served"])
+
+class TestKindAndSourceMetrics(unittest.TestCase):
+    """Grafana needs film vs series upload/disk and who approved what (Deepseek, TMDB, series)."""
+
+    def setUp(self):
+        self.films = {
+            "1": {"decision": True, "reason": "DC franchise", "hash": "ha"},
+            "2": {"decision": True, "reason": "TMDB: popularity 98, 70 votes, available 2026-10-23", "hash": "hb"},
+            "3": {"decision": True, "reason": "TMDB TV: popularity 155, 6272 votes", "kind": "series", "hash": "HC"},
+            "4": {"decision": False, "reason": "TMDB looks like a reject reason"},
+        }
+        self.real_load = C.load_json
+        C.load_json = lambda p, d=None: {"films": self.films}
+
+    def tearDown(self):
+        C.load_json = self.real_load
+
+    def _t(self, h, size, up):
+        return dict(_seed(h, size, uploaded=up), state="stalledUP")
+
+    def test_approval_source(self):
+        self.assertEqual([tm.approval_source(self.films[k]) for k in "123"], ["deepseek", "tmdb", "series"])
+
+    def test_split_by_kind_matches_hash_case_insensitively(self):
+        split = tm.split_by_kind([_seed("ha", 1), _seed("hc", 1), _seed("zz", 1)], self.films)
+        self.assertEqual(({k: [t["hash"] for t in v] for k, v in split.items()}),
+                         {"film": ["ha", "zz"], "series": ["hc"]})
+
+    def test_compute_metrics_splits_everything_by_kind(self):
+        torrents = [self._t("ha", 4 * 10 ** 9, 100), self._t("hc", 10 ** 9, 30)]
+        m = tm.compute_metrics(torrents, {})
+        self.assertEqual(m["approvals"], {"deepseek": 1, "tmdb": 1, "series": 1})
+        self.assertEqual(m["uploaded_by_kind"], {"film": 100, "series": 30})
+        self.assertEqual(m["disk_by_kind"], {"film": 4.0, "series": 1.0})
+        self.assertEqual(m["seeding_by_kind"], {"film": 1, "series": 1})
+
+    def test_per_kind_upload_counter_is_monotonic_across_runs_and_deletion(self):
+        st = {}
+        tm.compute_metrics([self._t("ha", 10 ** 9, 100), self._t("hc", 10 ** 9, 30)], st)
+        m = tm.compute_metrics([self._t("ha", 10 ** 9, 150)], st)    # series torrent gone
+        self.assertEqual(m["uploaded_by_kind"], {"film": 150, "series": 30})
+
+    def test_write_metrics_emits_labelled_series(self):
+        real_file, real_dir = tm.METRICS_FILE, C.TEXTFILE_DIR
+        tmp = tempfile.mkdtemp()
+        tm.METRICS_FILE, C.TEXTFILE_DIR = os.path.join(tmp, "autorss.prom"), tmp
+        try:
+            tm.write_metrics(tm.compute_metrics([self._t("hc", 10 ** 9, 30)], {}))
+            with open(tm.METRICS_FILE) as f:
+                text = f.read()
+        finally:
+            tm.METRICS_FILE, C.TEXTFILE_DIR = real_file, real_dir
+        for line in ('autorss_approvals_total{source="tmdb"} 1',
+                     'autorss_uploaded_bytes_by_kind_total{kind="series"} 30',
+                     'autorss_disk_used_gb_by_kind{kind="series"} 1.000',
+                     'autorss_seeding_by_kind{kind="film"} 0'):
+            self.assertIn(line, text)
+
 
 class TestSeriesMetrics(unittest.TestCase):
     def test_series_excluded_from_film_metrics(self):
