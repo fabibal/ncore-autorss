@@ -119,6 +119,59 @@ def approval_reason(clean, tok, today=None):
     return qualifies(lookup(clean, tok, today), today)
 
 
+# TV genres that are daily churn rather than appointment viewing: Reality, News, Talk, Soap.
+TV_SKIP_GENRES = {10764, 10763, 10767, 10766}
+
+
+def pick_show(results, name, year):
+    """Best /search/tv result for a show name, or None. Same normalised name (or original
+    name); with a year in the release name it must be within 1 of the show's first-air year
+    (that year disambiguates remakes: "Dark Matter 2024"); highest popularity wins."""
+    want = norm(name)
+    if not want:
+        return None
+    best = None
+    for r in results or []:
+        if want not in (norm(r.get("name")), norm(r.get("original_name"))):
+            continue
+        if year is not None:
+            y = _year(r.get("first_air_date"))
+            if y is None or abs(y - year) > 1:
+                continue
+        if best is None or (r.get("popularity") or 0) > (best.get("popularity") or 0):
+            best = r
+    return best
+
+
+def lookup_tv(name, year, tok):
+    """Facts about a TV show, or None when TMDB has no confident match. Raises on a
+    network / HTTP / parse failure (caller: "no information", never "not found")."""
+    results = _get("/search/tv", {"query": name, "language": "en-US"}, tok).get("results", [])
+    m = pick_show(results, name, year)
+    if not m:
+        return None
+    return {
+        "id": m["id"],
+        "name": m.get("name"),
+        "first_air_date": m.get("first_air_date"),
+        "popularity": m.get("popularity") or 0.0,
+        "vote_count": m.get("vote_count") or 0,
+        "genre_ids": m.get("genre_ids") or [],
+    }
+
+
+def show_qualifies(facts):
+    """Why TMDB says this show's new episodes are worth seeding, or None: popular enough
+    (with a minimum of votes) and not reality/news/talk/soap."""
+    if not facts:
+        return None
+    if TV_SKIP_GENRES & set(facts.get("genre_ids") or []):
+        return None
+    if facts.get("popularity", 0) < C.TMDB_TV_MIN_POPULARITY or facts.get("vote_count", 0) < C.TMDB_TV_MIN_VOTES:
+        return None
+    return "TMDB TV: popularity %.0f, %d votes" % (facts["popularity"], facts["vote_count"])
+
+
 def _get(path, params, tok):
     url = TMDB_URL + path + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"Authorization": "Bearer " + tok,

@@ -249,3 +249,32 @@ popularity >= `TMDB_MIN_POPULARITY` with >= `TMDB_MIN_VOTES` votes.
 - **Known limits.** A first-day rejection is permanent (`SEEN_STATUSES`), and a rising
   film is not re-evaluated. Hungarian-titled releases without a year often do not match
   (`Mocskos zsaruk`, `Parhuzamos tortenetek`), so they fall back to Deepseek alone.
+
+## Series pilot (episodes into the same category)
+
+The score multiplies by a torrent-count tier (76-150 = 2.5x, 151-250 = 3x, 251+ = 3.5x)
+while `seedsize` is plain bytes, so many small torrents beat few big ones at the same
+disk use. The feed carries ~230 series items/day (`Sorozat (ENG HD)`), ~1 GB per 720p
+episode. `plan_series` queues single 720p episodes (<= 1.5 GB, from the RSS `size`) of
+shows TMDB calls popular (popularity >= 30, >= 100 votes, not reality/news/talk/soap), at
+most `SERIES_DAILY_MAX` (3) per rolling 24h, one release per SxxExx. Season packs and
+dated dailies are ignored. Episodes are stored in `state["films"]` with `kind="series"`
+and `size`, so the add loop, reconcile and trim work unchanged; films sort ahead of
+episodes in the pending order, and the film metrics/panel exclude them. Per-show verdicts
+are cached 2 days under `state["series"]["shows"]`; a TMDB failure records nothing.
+
+- **It will not reach the 3x tier at the 480 GB cap.** Films (~36 GB/week via TMDB) plus 3
+  episodes/day (~21 GB/week) fill the ~81 GB headroom in about 1.5 weeks; after that each
+  add triggers a delete and the count flattens (~130-140, below 151). The pilot measures
+  upload per GB, it is not a route to 3x unless `CATEGORY_HARD_GB` is raised (host disk
+  has ~900 GB free). Quota 3, not 6, because of this.
+- **Hit-and-run precaution.** Once the cap binds, the smallest-sufficient trim would often
+  pick an episode downloaded hours earlier. nCore's minimum seed rule is not documented
+  here, so `select_victims` skips any seeder younger than `TRIM_MIN_AGE_S` (48h, a guess).
+- **No count floor in the trim.** The "never trim below 76 torrents" guard was planned but
+  dropped: the count is 88 and rising, the trim only fires above 480 GB, and the tier
+  floor is far below where the trim can leave it.
+- **How to judge it (~2 weeks):** upload per GB on disk per day of `kind=series` records
+  vs films added in the same window (young torrents upload ~14x more than old ones, so do
+  not compare to the old seeders), from `state.json` (`kind`, `size`, `hash`) and qB's
+  `uploaded`.

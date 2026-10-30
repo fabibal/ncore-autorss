@@ -174,10 +174,11 @@ def wanted_quality(title, feed_720p_keys):
 
 
 def fetch_films(rss_key):
-    """(items_total, [{id, title, link}]) for RSS items whose title contains '[Film'.
+    """(items_total, films, series): films = [{id, title, link}] for RSS items whose title
+    contains '[Film'; series = [{id, title, link, size}] for those tagged '[Sorozat'.
 
     items_total counts every <item> so an empty/HTML feed (passkey expired) is
-    visible as 0 even when no films match.
+    visible as 0 even when nothing matches.
     """
     url = "https://ncore.pro/rss.php?key=" + rss_key
     req = urllib.request.Request(url, headers={"User-Agent": "ncore-autorss/1.0"})
@@ -185,17 +186,105 @@ def fetch_films(rss_key):
         data = r.read()
     root = ET.fromstring(data)  # raises on HTML/garbage -> caught as a fetch failure
     items = root.findall(".//item")
-    films = []
+    films, series = [], []
     for it in items:
         title = (it.findtext("title") or "").strip()
-        if "[Film" not in title:
+        is_series = "[Sorozat" in title
+        if "[Film" not in title and not is_series:
             continue
         link = (it.findtext("link") or "").strip()
         m = re.search(r"[?&]id=(\d+)", link)
         if not m:
             continue
-        films.append({"id": m.group(1), "title": title, "link": link})
-    return len(items), films
+        if is_series:
+            try:
+                size = int(it.findtext("size") or 0)
+            except ValueError:
+                size = 0
+            series.append({"id": m.group(1), "title": title, "link": link, "size": size})
+        else:
+            films.append({"id": m.group(1), "title": title, "link": link})
+    return len(items), films, series
+
+
+# One episode of a show: "Show.Name[.Year].S08E15...". Season packs (S02 with no E) and
+# dated dailies don't match -- the pilot wants single fresh episodes only.
+EPISODE_RE = re.compile(r"^(?P<show>.+?)[. _]S(?P<s>\d{1,2})E(?P<e>\d{1,3})(?![0-9])", re.I)
+
+
+def parse_episode(title):
+    """(show_name, year_or_None, season, episode) for a single-episode release, else None.
+    A trailing 19xx/20xx token in the show part is the show's year ("Dark.Matter.2024"),
+    kept apart because it disambiguates remakes on TMDB."""
+    m = EPISODE_RE.match(re.sub(r"\s*\[[^\]]*\]\s*$", "", title.strip()))
+    if not m:
+        return None
+    show = re.sub(r"\s+", " ", m.group("show").replace(".", " ").replace("_", " ")).strip()
+    year = None
+    ym = re.search(r"\s((?:19|20)\d{2})$", show)
+    if ym and int(ym.group(1)) <= MAX_YEAR:
+        year, show = int(ym.group(1)), show[: ym.start()].strip()
+    return (show, year, int(m.group("s")), int(m.group("e"))) if show else None
+
+
+def plan_series(items, state, tok, lookup=None, now_ts=None):
+    """Series pilot. -> (new_recs {torrent_id: record}, show_updates {show_key: verdict},
+    failed). Queues up to SERIES_DAILY_MAX single 720p episodes per rolling 24h of shows
+    TMDB calls popular. Pure apart from `lookup`: the caller persists the result.
+
+    A show's verdict is cached SERIES_SHOW_TTL_S, so a re-seen feed item costs no TMDB call.
+    A lookup failure stops the plan (failed=True) and records nothing for that show:
+    "no information" must not turn into a cached "not popular"."""
+    lookup = lookup or tmdb.lookup_tv
+    now_ts = time.time() if now_ts is None else now_ts
+    films = state["films"]
+    shows = state.get("series", {}).get("shows", {})
+    day_ago = datetime.fromtimestamp(now_ts - 24 * 3600).strftime("%Y-%m-%d %H:%M:%S")
+    quota = C.SERIES_DAILY_MAX - sum(
+        1 for v in films.values()
+        if v.get("kind") == "series" and v.get("decision") is True and (v.get("asked_ts") or "") >= day_ago)
+    seen = seen_clean_titles(films)
+    new, updates = {}, {}
+    for it in items:
+        if quota <= 0:
+            break
+        title = it["title"]
+        if it["id"] in films or it["id"] in new:
+            continue
+        ep = parse_episode(title)
+        if not ep or not RES_720P_RE.search(title) or REMUX_RE.search(title) \
+                or not 0 < it.get("size", 0) <= C.SERIES_MAX_BYTES:
+            continue
+        name, year, season, episode = ep
+        clean = "%s S%02dE%02d" % (name, season, episode)
+        if dedup_key(clean) in seen:
+            continue
+        skey = dedup_key(name if year is None else "%s (%d)" % (name, year))
+        verdict = updates.get(skey) or shows.get(skey)
+        if verdict is None or now_ts - verdict["ts"] > C.SERIES_SHOW_TTL_S:
+            try:
+                why = tmdb.show_qualifies(lookup(name, year, tok))
+            except Exception:
+                return new, updates, True
+            verdict = updates[skey] = {"ts": now_ts, "ok": bool(why), "reason": why or "not popular enough"}
+        if not verdict["ok"]:
+            continue
+        new[it["id"]] = {"title": title, "clean": clean, "decision": True, "reason": verdict["reason"],
+                         "status": "pending", "link": it["link"], "asked_ts": now(),
+                         "kind": "series", "size": it["size"]}
+        seen.add(dedup_key(clean))
+        quota -= 1
+    return new, updates, False
+
+
+def _apply_series(s, new, updates, now_ts=None):
+    """Persist plan_series output into state; drops show verdicts older than 14 days."""
+    now_ts = time.time() if now_ts is None else now_ts
+    shows = s.setdefault("series", {}).setdefault("shows", {})
+    shows.update(updates)
+    for k in [k for k, v in shows.items() if now_ts - v["ts"] > 14 * 24 * 3600]:
+        del shows[k]
+    s["films"].update(new)
 
 
 def ask_deepseek(clean, key):
@@ -346,7 +435,7 @@ def _run():
     state = C.mutate_state(lambda s: s["_meta"].update({"last_run_ts": ts}))
 
     try:
-        n_items, films = fetch_films(rss_key)
+        n_items, films, series = fetch_films(rss_key)
     except Exception as e:
         log.error("RSS fetch failed: %s", e)
         state = C.mutate_state(lambda s: s["_meta"].update({"feed_items": 0, "feed_films": 0}))
@@ -441,6 +530,17 @@ def _run():
         log.info("DECISION%s | %r -> download=%s | reason=%r",
                  " (cached)" if cached else "", clean, decision, reason)
 
+    # Series pilot: TMDB-popular single episodes, a few per day (needs the TMDB token).
+    if tmdb_tok and not tmdb_down and series:
+        new_eps, show_updates, failed = plan_series(series, state, tmdb_tok)
+        if failed:
+            tmdb_down = True
+            log.warning("TMDB show lookup failed; series planning stopped for this run")
+        if new_eps or show_updates:
+            state = C.mutate_state(lambda s, n=new_eps, u=show_updates: _apply_series(s, n, u))
+        for rec in new_eps.values():
+            log.info("SERIES | %r (%.2f GB) queued | %s", rec["clean"], rec["size"] / 1e9, rec["reason"])
+
     # Trim the auto-film category back under its hard cap. This deletes only completed
     # 0-peer torrents and no-ops while the category is under CATEGORY_HARD_GB, so in
     # normal operation it removes nothing.
@@ -478,6 +578,9 @@ def _run():
     # Newest-approved first: hot releases peak in leechers in their first hours, so
     # grabbing them early maximises up(interval) and keeps avg(torrdate) fresh.
     pending.sort(key=lambda fid: state["films"][fid].get("asked_ts", ""), reverse=True)
+    # Films ahead of series episodes (stable sort keeps newest-first within each group),
+    # or fresh 1 GB episodes would outrank film approvals made hours earlier.
+    pending.sort(key=lambda fid: state["films"][fid].get("kind") == "series")
 
     # Soft cap: if the category is still over CATEGORY_CAP_GB (0-peer deletion couldn't
     # bring it down -- everything has peers), HOLD rather than add more. Existing seeders

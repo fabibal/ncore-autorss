@@ -1146,9 +1146,9 @@ class TestRunTmdbWiring(unittest.TestCase):
             setattr(tmdb, n, v)
         subprocess.run = self.saved_run
 
-    def _run(self, titles):
-        autorss.fetch_films = lambda key: (len(titles), [
-            {"id": str(i), "title": t, "link": "http://l/%d" % i} for i, t in enumerate(titles, 1)])
+    def _run(self, titles, series=()):
+        autorss.fetch_films = lambda key: (len(titles) + len(series), [
+            {"id": str(i), "title": t, "link": "http://l/%d" % i} for i, t in enumerate(titles, 1)], list(series))
         autorss._run()
         return C.load_json(C.STATE_FILE, {})["films"]
 
@@ -1197,6 +1197,199 @@ class TestRunTmdbWiring(unittest.TestCase):
         self.assertEqual(f["status"], "rejected")
         self.assertEqual(self.tmdb_calls, [])
 
+
+class TestParseEpisode(unittest.TestCase):
+    def test_single_episode_with_and_without_year(self):
+        self.assertEqual(autorss.parse_episode("American.Horror.Story.S13E13.720p.WEB-DL-NTb [Sorozat (ENG HD)]"),
+                         ("American Horror Story", None, 13, 13))
+        self.assertEqual(autorss.parse_episode("Dark.Matter.2024.S02E03.720p.ATVP.WEB-DL [Sorozat (ENG HD)]"),
+                         ("Dark Matter", 2024, 2, 3))
+
+    def test_season_pack_and_dated_daily_are_not_episodes(self):
+        self.assertIsNone(autorss.parse_episode("Dark.Matter.2024.S02.720p.ATVP.WEB-DL [Sorozat (ENG HD)]"))
+        self.assertIsNone(autorss.parse_episode("Newsroom.Tokyo.2026.10.30.1080p.HDTV [Sorozat (ENG HD)]"))
+
+    def test_number_in_title_is_not_a_year(self):
+        self.assertEqual(autorss.parse_episode("Blade.Runner.2099.S01E01.720p.WEB [Sorozat (ENG HD)]")[:2],
+                         ("Blade Runner 2099", None))
+
+
+class TestPlanSeries(unittest.TestCase):
+    """The pilot queues only single 720p episodes of TMDB-popular shows, at most
+    SERIES_DAILY_MAX per rolling day, one release per episode."""
+    POPULAR = {"popularity": 155.0, "vote_count": 6272, "genre_ids": [18]}
+
+    def setUp(self):
+        self.lookups = []
+        self.verdicts = {}
+        self.now_ts = 1_800_000_000.0
+
+    def _lookup(self, name, year, tok):
+        self.lookups.append(name)
+        v = self.verdicts[name]
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    def _item(self, i, title, size=int(1e9)):
+        return {"id": str(i), "title": title + " [Sorozat (ENG HD)]", "link": "http://l/%d" % i, "size": size}
+
+    def _plan(self, items, state=None):
+        return autorss.plan_series(items, state or {"films": {}}, "tok", self._lookup, self.now_ts)
+
+    def test_popular_episode_queued_with_kind_and_size(self):
+        self.verdicts["Hit Show"] = self.POPULAR
+        new, upd, failed = self._plan([self._item(1, "Hit.Show.S01E02.720p.WEB-DL.H264-X")])
+        rec = new["1"]
+        self.assertEqual((rec["kind"], rec["status"], rec["decision"], rec["size"], rec["clean"]),
+                         ("series", "pending", True, int(1e9), "Hit Show S01E02"))
+        self.assertTrue(upd["hit show"]["ok"])
+        self.assertFalse(failed)
+
+    def test_wrong_quality_pack_and_oversize_are_skipped_without_lookup(self):
+        self.verdicts["Hit Show"] = self.POPULAR
+        items = [self._item(1, "Hit.Show.S01E02.1080p.WEB-DL.H264-X"),
+                 self._item(2, "Hit.Show.S01.720p.WEB-DL.H264-X"),
+                 self._item(3, "Hit.Show.S01E03.720p.WEB-DL.H264-X", size=int(2e9)),
+                 self._item(4, "Hit.Show.S01E04.720p.WEB-DL.H264-X", size=0)]
+        new, upd, _ = self._plan(items)
+        self.assertEqual((new, upd, self.lookups), ({}, {}, []))
+
+    def test_unpopular_show_cached_as_no_and_not_looked_up_again(self):
+        self.verdicts["Quiet"] = {"popularity": 3.0, "vote_count": 0, "genre_ids": [18]}
+        items = [self._item(1, "Quiet.S01E01.720p.WEB-DL.H264-X"), self._item(2, "Quiet.S01E02.720p.WEB-DL.H264-X")]
+        new, upd, _ = self._plan(items)
+        self.assertEqual((new, self.lookups, upd["quiet"]["ok"]), ({}, ["Quiet"], False))
+
+    def test_cached_verdict_reused_without_lookup(self):
+        state = {"films": {}, "series": {"shows": {"hit show": {"ts": self.now_ts - 3600, "ok": True,
+                                                                "reason": "TMDB TV: popularity 155, 6272 votes"}}}}
+        new, _, _ = self._plan([self._item(1, "Hit.Show.S01E02.720p.WEB-DL.H264-X")], state)
+        self.assertEqual((list(new), self.lookups), (["1"], []))
+
+    def test_expired_cache_asks_tmdb_again(self):
+        self.verdicts["Hit Show"] = self.POPULAR
+        state = {"films": {}, "series": {"shows": {"hit show": {"ts": self.now_ts - C.SERIES_SHOW_TTL_S - 1,
+                                                                "ok": False, "reason": "x"}}}}
+        new, _, _ = self._plan([self._item(1, "Hit.Show.S01E02.720p.WEB-DL.H264-X")], state)
+        self.assertEqual((list(new), self.lookups), (["1"], ["Hit Show"]))
+
+    def test_daily_quota_caps_approvals(self):
+        self.verdicts["Hit Show"] = self.POPULAR
+        items = [self._item(i, "Hit.Show.S01E%02d.720p.WEB-DL.H264-X" % i) for i in range(1, 8)]
+        new, _, _ = self._plan(items)
+        self.assertEqual(len(new), C.SERIES_DAILY_MAX)
+
+    def test_quota_counts_the_last_24h_only(self):
+        self.verdicts["Hit Show"] = self.POPULAR
+        ts = lambda h: autorss.datetime.fromtimestamp(self.now_ts - h * 3600).strftime("%Y-%m-%d %H:%M:%S")
+        recent = {"r%d" % i: {"kind": "series", "decision": True, "clean": "Old %d" % i, "status": "downloaded",
+                              "asked_ts": ts(2)} for i in range(C.SERIES_DAILY_MAX)}
+        self.assertEqual(self._plan([self._item(1, "Hit.Show.S01E01.720p.WEB-DL.H264-X")],
+                                    {"films": recent})[0], {})
+        stale = {k: dict(v, asked_ts=ts(30)) for k, v in recent.items()}
+        self.assertEqual(len(self._plan([self._item(1, "Hit.Show.S01E01.720p.WEB-DL.H264-X")],
+                                        {"films": stale})[0]), 1)
+
+    def test_two_releases_of_one_episode_give_one_add(self):
+        self.verdicts["Hit Show"] = self.POPULAR
+        items = [self._item(1, "Hit.Show.S01E02.720p.WEB-DL.H264-AAA"), self._item(2, "Hit.Show.S01E02.720p.WEB.H264-BBB")]
+        new, _, _ = self._plan(items)
+        self.assertEqual(list(new), ["1"])
+
+    def test_episode_already_in_state_is_not_requeued(self):
+        self.verdicts["Hit Show"] = self.POPULAR
+        state = {"films": {"9": {"clean": "Hit Show S01E02", "status": "downloaded", "decision": True}}}
+        self.assertEqual(self._plan([self._item(1, "Hit.Show.S01E02.720p.WEB-DL.H264-X")], state)[0], {})
+
+    def test_tmdb_failure_records_nothing_for_that_show(self):
+        self.verdicts["Hit Show"] = urllib.error.URLError("down")
+        new, upd, failed = self._plan([self._item(1, "Hit.Show.S01E02.720p.WEB-DL.H264-X")])
+        self.assertEqual((new, upd, failed), ({}, {}, True))
+
+    def test_news_talk_reality_shows_never_qualify(self):
+        for g in (10763, 10764, 10766, 10767):
+            self.assertIsNone(tmdb.show_qualifies({"popularity": 500.0, "vote_count": 5000, "genre_ids": [g]}))
+
+
+class TestRunSeries(unittest.TestCase):
+    """_run wiring of the series pilot, on top of TestRunTmdbWiring's harness."""
+
+    def setUp(self):
+        self.h = TestRunTmdbWiring("test_without_a_token_tmdb_is_never_called")
+        self.h.setUp()
+        self.real_lookup = tmdb.lookup_tv
+        self.calls = []
+        tmdb.lookup_tv = self._lookup
+        self.answer = {"popularity": 155.0, "vote_count": 6272, "genre_ids": [18]}
+
+    def tearDown(self):
+        tmdb.lookup_tv = self.real_lookup
+        self.h.tearDown()
+
+    def _lookup(self, name, year, tok):
+        self.calls.append(name)
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+    def _item(self, i, title, size=int(1e9)):
+        return {"id": str(100 + i), "title": title + " [Sorozat (ENG HD)]", "link": "http://l/%d" % i, "size": size}
+
+    def test_episode_is_queued_as_pending_series_record(self):
+        films = self.h._run([], [self._item(1, "Hit.Show.S01E02.720p.WEB-DL.H264-X")])
+        rec = films["101"]
+        self.assertEqual((rec["kind"], rec["status"], rec["decision"]), ("series", "pending", True))
+        self.assertEqual(C.load_json(C.STATE_FILE, {})["series"]["shows"]["hit show"]["ok"], True)
+
+    def test_without_a_token_series_are_ignored(self):
+        tmdb.token = lambda: ""
+        films = self.h._run([], [self._item(1, "Hit.Show.S01E02.720p.WEB-DL.H264-X")])
+        self.assertEqual((films, self.calls), ({}, []))
+
+    def test_tmdb_outage_stops_film_and_series_lookups_for_the_run(self):
+        self.h.deepseek["Verity (2026)"] = (False, "Unrecognised title")
+        self.h._tmdb(urllib.error.URLError("down"))
+        self.answer = urllib.error.URLError("down")
+        films = self.h._run(["Verity.2026.720p.WEB-DL.H264-X [Film (HUN HD)]"],
+                            [self._item(1, "Hit.Show.S01E02.720p.WEB-DL.H264-X")])
+        self.assertEqual(films["1"]["status"], "rejected")
+        self.assertNotIn("101", films)
+        self.assertEqual(self.calls, [])        # film path already marked TMDB down
+
+    def test_film_pending_sorts_ahead_of_series(self):
+        order = []
+        state_films = {"f": {"asked_ts": "2026-10-30 08:00:00", "status": "pending"},
+                       "s": {"asked_ts": "2026-10-30 09:00:00", "status": "pending", "kind": "series"}}
+        pending = ["s", "f"]
+        pending.sort(key=lambda fid: state_films[fid].get("asked_ts", ""), reverse=True)
+        pending.sort(key=lambda fid: state_films[fid].get("kind") == "series")
+        self.assertEqual(pending, ["f", "s"])
+
+
+class TestTrimMinAge(unittest.TestCase):
+    """ensure-space never deletes a seeder younger than TRIM_MIN_AGE_S."""
+
+    def test_fresh_episode_is_not_a_victim(self):
+        now = 2_000_000_000.0
+        old = dict(_seed("old", 5 * 10 ** 9), added_on=now - C.TRIM_MIN_AGE_S - 1)
+        fresh = dict(_seed("fresh", 10 ** 9), added_on=now - 3600)
+        victims, _ = tm.select_victims([fresh, old], 10 ** 8, {}, now)
+        self.assertEqual([t["hash"] for t in victims], ["old"])
+
+    def test_missing_added_on_stays_eligible(self):
+        victims, _ = tm.select_victims([_seed("x", 10 ** 9)], 10 ** 8, {}, 2_000_000_000.0)
+        self.assertEqual([t["hash"] for t in victims], ["x"])
+
+    def test_series_excluded_from_film_metrics(self):
+        films = {"a": {"decision": True}, "b": {"decision": True, "kind": "series"}}
+        real = C.load_json
+        C.load_json = lambda p, d: {"films": films}
+        try:
+            self.assertEqual(tm.compute_metrics([], {})["approved"], 1)
+            self.assertEqual(len(tm.recent_approved_films()), 1)
+        finally:
+            C.load_json = real
 
 
 if __name__ == "__main__":

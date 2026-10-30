@@ -9,6 +9,7 @@ on the server via cron (no Docker compose of its own — it drives the existing
 
 - `autorss.py` — main pipeline (cron */15 min). RSS fetch → remux/720p pre-filter →
   Deepseek verdict → queue downloads (≤`MAX_ACTIVE_DOWNLOADS`, newest-approved first).
+  Series pilot: a few TMDB-popular 720p episodes/day into the same category (`kind=series`).
 - `torrent-manager.py` — `monitor` (cron 2h + called by autorss in `finally`): peer
   sampling, metrics, state reconcile, Grafana panel, up/down accumulators.
   `ensure-space [CAP_GB]`: trim completed 0-peer seeders when the category is over cap.
@@ -39,6 +40,8 @@ requests get **403 through Docker NAT**, so every qB API call goes via
 | `MAX_ADD_ATTEMPTS` | 5 | unconfirmed adds before `status=add_failed` |
 | `STALL_TIMEOUT_S` | 6h | peerless download past this = dead, frees a slot |
 | `TMDB_MIN_POPULARITY` / `TMDB_MIN_VOTES` | 30 / 20 | TMDB popularity+votes that approve a film Deepseek rejected |
+| `SERIES_DAILY_MAX` / `SERIES_MAX_BYTES` | 3 / 1.5 GB | series pilot: episodes queued per rolling 24h / max size each |
+| `TRIM_MIN_AGE_S` | 48h | ensure-space never deletes a seeder younger than this |
 | `UNREGISTERED_GRACE_S` | 24h | tracker says "unregistered torrent" this long -> `monitor` removes it |
 
 Disk policy bounds the **category's committed size**, not host free space; deletion
