@@ -1367,20 +1367,51 @@ class TestRunSeries(unittest.TestCase):
         self.assertEqual(pending, ["f", "s"])
 
 
-class TestTrimMinAge(unittest.TestCase):
-    """ensure-space never deletes a seeder younger than TRIM_MIN_AGE_S."""
+class TestSeedObligation(unittest.TestCase):
+    """nCore hit-and-run: ratio 1.0, or (1 - ratio) * (48 + 0.4 * downloaded_GB) hours of
+    seed time. ensure-space only deletes seeders that meet it."""
+    GB = 10 ** 9
 
-    def test_fresh_episode_is_not_a_victim(self):
-        now = 2_000_000_000.0
-        old = dict(_seed("old", 5 * 10 ** 9), added_on=now - C.TRIM_MIN_AGE_S - 1)
-        fresh = dict(_seed("fresh", 10 ** 9), added_on=now - 3600)
-        victims, _ = tm.select_victims([fresh, old], 10 ** 8, {}, now)
-        self.assertEqual([t["hash"] for t in victims], ["old"])
+    def _t(self, size_gb, ratio, seeded_h, downloaded_gb=None):
+        d = (size_gb if downloaded_gb is None else downloaded_gb) * self.GB
+        return dict(_seed("h", int(size_gb * self.GB)), ratio=ratio, seeding_time=int(seeded_h * 3600),
+                    downloaded=int(d))
 
-    def test_missing_added_on_stays_eligible(self):
-        victims, _ = tm.select_victims([_seed("x", 10 ** 9)], 10 ** 8, {}, 2_000_000_000.0)
-        self.assertEqual([t["hash"] for t in victims], ["x"])
+    def test_ratio_one_or_more_is_always_met(self):
+        self.assertTrue(C.seed_obligation_met(self._t(1, 1.0, 0)))
+        self.assertTrue(C.seed_obligation_met(self._t(5, 30.0, 0.1)))
 
+    def test_fresh_episode_at_ratio_zero_needs_48h_plus_04_per_gb(self):
+        # 1 GB at ratio 0 needs 48.4h + 2h margin
+        self.assertFalse(C.seed_obligation_met(self._t(1, 0.0, 48.0)))
+        self.assertFalse(C.seed_obligation_met(self._t(1, 0.0, 50.0)))
+        self.assertTrue(C.seed_obligation_met(self._t(1, 0.0, 50.5)))
+
+    def test_bigger_download_needs_more_time(self):
+        # 25 GB: 48 + 10 = 58h (+2h margin)
+        self.assertFalse(C.seed_obligation_met(self._t(25, 0.0, 59.0)))
+        self.assertTrue(C.seed_obligation_met(self._t(25, 0.0, 60.5)))
+
+    def test_partial_ratio_shortens_the_time(self):
+        # ratio 0.5 on 1 GB: 24.2h + 2h margin
+        self.assertFalse(C.seed_obligation_met(self._t(1, 0.5, 25.0)))
+        self.assertTrue(C.seed_obligation_met(self._t(1, 0.5, 26.5)))
+
+    def test_barely_downloaded_torrent_has_no_obligation(self):
+        self.assertTrue(C.seed_obligation_met(self._t(10, 0.0, 0, downloaded_gb=0.1)))   # < 200 MB and < 5%
+
+    def test_missing_ratio_or_seed_time_counts_as_met(self):
+        self.assertTrue(C.seed_obligation_met(_seed("x", 10 ** 9)))
+
+    def test_select_victims_skips_unmet_obligation(self):
+        served = self._t(5, 0.0, 120.0)
+        served["hash"] = "served"
+        young = self._t(1, 0.0, 3.0)
+        young["hash"] = "young"
+        victims, _ = tm.select_victims([young, served], 10 ** 8, {}, 2_000_000_000.0)
+        self.assertEqual([t["hash"] for t in victims], ["served"])
+
+class TestSeriesMetrics(unittest.TestCase):
     def test_series_excluded_from_film_metrics(self):
         films = {"a": {"decision": True}, "b": {"decision": True, "kind": "series"}}
         real = C.load_json

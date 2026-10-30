@@ -163,9 +163,9 @@ def delete_torrent(t, st):
 
 def select_victims(torrents, over, zs, now):
     """Ordered deletion plan for an `over`-byte overage. Candidates are completed 0-peer
-    seeders ONLY that are at least TRIM_MIN_AGE_S old (a just-added 1 GB episode must not
-    be deleted hours after its download), sorted smallest-first (ties broken by longest at 0 peers); the smallest
-    single candidate that alone covers `over` is promoted to the front. Returns
+    seeders ONLY whose nCore seed obligation is met (a just-downloaded episode at ratio < 1
+    must not be deleted before its hit-and-run time is served), sorted smallest-first
+    (ties broken by longest at 0 peers); the smallest single candidate that alone covers `over` is promoted to the front. Returns
     (victims, single) where `single` is None when no one candidate covers the overage and
     they must be combined smallest-first.
 
@@ -175,7 +175,7 @@ def select_victims(torrents, over, zs, now):
     than none, since its whole job is to be trusted before an irreversible delete."""
     cands = sorted(
         (t for t in torrents if peers(t) == 0 and (t.get("progress") or 0) >= 1.0
-         and (t.get("added_on") is None or now - t["added_on"] >= C.TRIM_MIN_AGE_S)),
+         and C.seed_obligation_met(t)),
         key=lambda t: (disk_bytes(t), zs.get(t.get("hash"), now)),
     )
     # The leader covers the overage alone; the rest follow smallest-first so a FAILED

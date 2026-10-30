@@ -268,9 +268,15 @@ are cached 2 days under `state["series"]["shows"]`; a TMDB failure records nothi
   add triggers a delete and the count flattens (~130-140, below 151). The pilot measures
   upload per GB, it is not a route to 3x unless `CATEGORY_HARD_GB` is raised (host disk
   has ~900 GB free). Quota 3, not 6, because of this.
-- **Hit-and-run precaution.** Once the cap binds, the smallest-sufficient trim would often
-  pick an episode downloaded hours earlier. nCore's minimum seed rule is not documented
-  here, so `select_victims` skips any seeder younger than `TRIM_MIN_AGE_S` (48h, a guess).
+- **Hit-and-run.** Once the cap binds, the smallest-sufficient trim would often pick an
+  episode downloaded hours earlier. nCore requires, per torrent with >= 5% or >= 200 MB
+  downloaded, either ratio 1.0 or `(1 - ratio) * (48 + 0.4 * downloaded_GB)` hours of
+  seed time, checked at month end; a sanctionless allowance exists per rank, beyond it
+  download bans of 5 / 15 / 30 days. `seed_obligation_met` (autorss_common) encodes that
+  with `HNR_MARGIN_S` (2h) slack for the tracker's announce lag, and `select_victims`
+  only offers torrents that meet it. A 1 GB episode at ratio 0 needs ~48.4h, a 4.5 GB film
+  ~50h. A flat 48h age floor, the first version, would have been just short. The seeders
+  here sit at ratio 10-40, so in practice the rule only ever shields fresh downloads.
 - **No count floor in the trim.** The "never trim below 76 torrents" guard was planned but
   dropped: the count is 88 and rising, the trim only fires above 480 GB, and the tier
   floor is far below where the trim can leave it.

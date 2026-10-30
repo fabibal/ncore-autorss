@@ -46,7 +46,7 @@ TMDB_TV_MIN_VOTES = 100        # TV votes accrue over seasons, so a real show cl
 SERIES_DAILY_MAX = 3           # series pilot: episodes approved per rolling 24h (disk headroom is ~80 GB)
 SERIES_MAX_BYTES = int(1.5e9)  # series pilot: single 720p episodes only; bigger = season pack / 4K-ish
 SERIES_SHOW_TTL_S = 2 * 24 * 3600  # re-ask TMDB about a show this often (popularity moves)
-TRIM_MIN_AGE_S = 48 * 3600     # ensure-space never deletes a seeder younger than this (hit-and-run precaution)
+HNR_MARGIN_S = 2 * 3600        # nCore books seed time from announces (30-44 min lag); trim keeps this much slack
 UNREGISTERED_GRACE_S = 24 * 3600  # tracker must say "unregistered torrent" this long before monitor removes it
 
 
@@ -169,6 +169,24 @@ def qb_torrents(category=QB_CATEGORY):
 def peers(t):
     """Connected peers other than us: seeds + leechers we are connected to."""
     return (t.get("num_seeds") or 0) + (t.get("num_leechs") or 0)
+
+
+def seed_obligation_met(t):
+    """True when deleting this torrent can no longer be a nCore hit-and-run.
+
+    nCore requires, for any torrent with >= 5% or >= 200 MB downloaded, either ratio 1.0
+    or this much seed time:  (1 - ratio) * (48 + 0.4 * downloaded_GB) hours. Checked at
+    month end, so deleting before it is met counts. HNR_MARGIN_S of slack covers the
+    tracker's announce lag. A torrent qB reports without ratio/seeding_time is treated as
+    met (qB always sends them; this keeps minimal test fixtures valid)."""
+    ratio, seeded = t.get("ratio"), t.get("seeding_time")
+    if ratio is None or seeded is None:
+        return True
+    downloaded = t.get("downloaded") or t.get("completed") or t.get("size") or 0
+    if downloaded < min(0.05 * (t.get("size") or downloaded), 200e6) or ratio >= 1.0:
+        return True
+    needed_s = (1 - ratio) * (48 + 0.4 * downloaded / 1e9) * 3600
+    return seeded >= needed_s + HNR_MARGIN_S
 
 
 def torrent_size(t):
