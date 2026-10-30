@@ -576,7 +576,7 @@ def _run():
         return
 
     # Newest-approved first: hot releases peak in leechers in their first hours, so
-    # grabbing them early maximises up(interval) and keeps avg(torrdate) fresh.
+    # grabbing them early maximises up(interval).
     pending.sort(key=lambda fid: state["films"][fid].get("asked_ts", ""), reverse=True)
     # Films ahead of series episodes (stable sort keeps newest-first within each group),
     # or fresh 1 GB episodes would outrank film approvals made hours earlier.

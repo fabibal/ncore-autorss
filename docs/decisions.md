@@ -12,13 +12,20 @@ ERTEK = up(interval) · avg(torrdate) · time · seedsize · skala_torrszam
 ```
 
 - `up(interval)` — bytes uploaded in the last 7 days / uninterrupted seed run.
-- `avg(torrdate)` — average age of running torrents (newer = better).
+- `avg(torrdate)` — average age of running torrents. **Direction unverified:** nCore's text
+  says "átlag életkora" (average *age*), and in a product a larger age raises the score,
+  i.e. older would be better; this file used to say "newer = better" with no source. The
+  "fresh" choices below stand on `up(interval)` (young torrents upload ~14x more per day),
+  not on this term.
 - `time` — total seed time across all running torrents.
 - `seedsize` — total bytes seeding.
 - `skala_torrszam` — torrent-count tier multiplier (step function: 0–10=1×,
   11–25=1.5×, 26–75=2×, 76–150=2.5×, 151–250=3×, 251+=3.5×).
 - `regdate`, `upload` (lifetime), `owntorr` (own uploads) — account-level, **not
   controllable by this bot**.
+- The first five are measured over the last 7 days *or the uninterrupted seeding period*
+  ("a seed-elés megszakítása nélkül"), so downtime (qB restart, modem outage) may shrink
+  the window. Exact semantics are not confirmed; keep seeding continuous.
 
 Because the score is a **product**, every factor matters and a 0-peer torrent still
 contributes full weight to `time`, `seedsize`, and `skala_torrszam` (only `up` is
@@ -88,8 +95,7 @@ ratio/seed-time cap would silently bleed score. `-1` = no limit, overriding glob
 
 `MAX_ACTIVE_DOWNLOADS=3` (was effectively 1) grows the torrent count faster (crosses
 `skala_torrszam` tiers sooner). Pending downloads are taken newest-approved first:
-hot releases peak in leechers in their first hours, maximising `up(interval)` and
-keeping `avg(torrdate)` fresh.
+hot releases peak in leechers in their first hours, maximising `up(interval)`.
 
 ## A download slot is freed by futility, not by loneliness
 
@@ -158,7 +164,7 @@ Approve mainstream, high-demand films from the last 12 months (rolling cutoff in
 (Netflix/Amazon/etc.) is judged the same as a theatrical release, since it can
 generate just as much seeding demand. Reject classics, TV series/movies, low-budget
 direct-to-video, docs, sports, concerts, awards shows. This serves `up(interval)`
-(high demand) and `avg(torrdate)` (fresh). Verdicts are cached per clean title (via
+(high demand; `avg(torrdate)`'s direction is unverified, see the top). Verdicts are cached per clean title (via
 `dedup_key`, case-insensitive) so quality variants -- including differently-cased
 scene releases of the same film -- reuse one call.
 
