@@ -75,7 +75,7 @@ def main():
               % (cap, over / 1e9, len(victims),
                  ("idle-first, " if plan and C.is_idle(plan[0], now) else "")
                  + ("smallest sufficient" if single is not None
-                    else "no single candidate covers it; combining smallest-first")))
+                    else "no single candidate covers it; combining the fewest that do")))
         for t in plan:
             print(describe(t, zs, now))
         if freed < over:

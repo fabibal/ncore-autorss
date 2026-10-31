@@ -46,9 +46,12 @@ torrent with peers. Its domain (completed seeders) is disjoint from the queue ga
 (incomplete downloads), so the two predicates can't disagree about the same torrent.
 
 Among those candidates we take the **smallest single one that covers the overage**;
-only if no single candidate covers it do we combine smallest-first. Removing one
-torrent preserves the `skala_torrszam` count tier exactly as well as the largest-first
-rule this replaced, but destroys far less accrued `time`/`seedsize`.
+only if no single candidate covers it do we combine the **fewest** that do: take the
+largest, repeat on what is still needed, finishing with the smallest sufficient one
+(changed 2026-10-31; it used to combine smallest-first, which on a 23 GB overage would
+delete 9 small torrents and eat into the 16-torrent margin above the 76 tier). Removing
+one torrent preserves the `skala_torrszam` count tier exactly as well as the
+largest-first rule this replaced, but destroys far less accrued `time`/`seedsize`.
 
 Two earlier rules were wrong here. The doc used to claim largest-first while the code
 actually sorted by *longest at 0 peers* — a quantity uncorrelated with the overage,

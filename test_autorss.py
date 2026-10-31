@@ -668,12 +668,32 @@ class TestEnsureSpaceSmallestSufficient(unittest.TestCase):
                 self.assertGreaterEqual(freed, over, "still gets back under the cap")
                 self.assertLess(freed, old_freed_gb * 1e9, "cheaper than the old rule")
 
-    def test_combines_smallest_first_when_no_single_candidate_covers(self):
+    def test_combines_the_fewest_when_no_single_candidate_covers(self):
         torrents = self._pool([1.0, 2.0, 3.0])
         cap, over = self._cap_for(torrents, 4.5)  # bigger than any one candidate
         tm.ensure_space(cap, torrents, {"zero_since": {}})
-        self.assertEqual(self.deleted, ["t00", "t01", "t02"])
+        # largest (3) first, then the smallest that covers the remaining 1.5 (the 2): two
+        # torrents, not the three that smallest-first would delete
+        self.assertEqual(self.deleted, ["t02", "t01"])
         self.assertGreaterEqual(self._freed(torrents), over)
+
+    def test_prefers_few_big_torrents_over_many_small_ones(self):
+        torrents = self._pool([1.0, 1.0, 1.0, 1.0, 1.0, 9.0])
+        victims, single = tm.select_victims(torrents, int(12 * 1e9), {}, 2_000_000_000.0)
+        plan, freed = [], 0
+        for t in victims:
+            if freed >= 12 * 1e9:
+                break
+            plan.append(t)
+            freed += tm.disk_bytes(t)
+        self.assertIsNone(single)
+        self.assertEqual(len(plan), 4)                    # 9 + 1 + 1 + 1, not all five 1 GB plus the 9
+        self.assertEqual(freed, int(12 * 1e9))
+
+    def test_a_single_sufficient_torrent_is_still_the_whole_plan(self):
+        torrents = self._pool([1.0, 2.0, 6.0])
+        victims, single = tm.select_victims(torrents, int(1.5 * 1e9), {}, 2_000_000_000.0)
+        self.assertEqual((single["hash"], victims[0]["hash"]), ("t01", "t01"))
 
     def test_equal_sizes_tie_broken_by_longest_at_zero_peers(self):
         """The replaced `-disk_bytes` tie-break was unreachable (zero_since floats never

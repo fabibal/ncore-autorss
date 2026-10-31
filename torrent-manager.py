@@ -10,8 +10,8 @@ Modes:
   ensure-space [CAP_GB]   Called by autorss before adding a torrent. If the auto-film
                           CATEGORY's committed size exceeds CAP_GB, delete the SMALLEST
                           SUFFICIENT completed 0-peer seeders (smallest single candidate
-                          that covers the overage; otherwise smallest-first until it is
-                          covered) to get back under CAP_GB. Never deletes a torrent with
+                          that covers the overage; otherwise the fewest torrents that do)
+                          to get back under CAP_GB. Never deletes a torrent with
                           connected peers or one still downloading.
 
 Shared infra (qB via docker exec, the active-download rule, json/log/lock helpers,
@@ -170,7 +170,7 @@ def select_victims(torrents, over, zs, now):
     are sorted smallest-first (ties broken by longest at 0 peers) and the smallest single
     one that alone covers `over` is promoted to the front; the other candidates follow so a
     failed delete falls through. Returns (victims, single) where `single` is None when no
-    one candidate covers the overage and they must be combined smallest-first.
+    one candidate covers the overage and the plan combines the fewest torrents that do.
 
     Pure and side-effect-free purely so `dryrun-ensure-space.py` can print the exact plan
     a real run would follow. A dry-run that reimplemented this selection would silently
@@ -188,13 +188,24 @@ def select_victims(torrents, over, zs, now):
 
 
 def _smallest_sufficient(pool, over, zs, now):
-    """`pool` ordered smallest-first (ties: longest at 0 peers) with the smallest single
-    torrent that alone covers `over` promoted to the front; (ordered, that torrent or None).
-    The leader covers the overage alone; the rest follow smallest-first so a FAILED delete
-    still falls through to the next-best option instead of giving up."""
-    ordered = sorted(pool, key=lambda t: (disk_bytes(t), zs.get(t.get("hash"), now)))
-    single = next((t for t in ordered if disk_bytes(t) >= over), None)
-    return (ordered if single is None else [single] + [t for t in ordered if t is not single]), single
+    """Deletion plan from `pool` for an `over`-byte overage: (ordered, single).
+
+    Each step takes the SMALLEST torrent that alone covers what is still needed; when none
+    does, it takes the LARGEST one and repeats on the remainder. A single sufficient torrent
+    is the whole plan (single is that torrent). Otherwise the plan is the fewest torrents
+    that cover the overage with a small overshoot (single is None) -- combining small ones
+    smallest-first would delete many torrents, and the torrent count is a score tier
+    multiplier. The unused candidates follow, smallest-first (ties: longest at 0 peers), so
+    a FAILED delete still falls through to the next option instead of giving up."""
+    rest = sorted(pool, key=lambda t: (disk_bytes(t), zs.get(t.get("hash"), now)))
+    plan, need = [], over
+    while need > 0 and rest:
+        pick = next((t for t in rest if disk_bytes(t) >= need), rest[-1])
+        plan.append(pick)
+        need -= disk_bytes(pick)
+        rest = [t for t in rest if t is not pick]
+    single = plan[0] if plan and disk_bytes(plan[0]) >= over else None
+    return plan + rest, single
 
 
 def ensure_space(cap_gb, torrents, st):
@@ -206,7 +217,8 @@ def ensure_space(cap_gb, torrents, st):
     committed size exceeds the cap.
 
     Selection (changed 2026-08-04): pick the SMALLEST single candidate that alone covers
-    the overage; only if no single one covers it, combine smallest-first until it does.
+    the overage; only if no single one covers it, take the fewest torrents that do (largest
+    first, finishing with the smallest sufficient one).
     Previously this deleted the candidate that had been at 0 peers LONGEST, which is
     uncorrelated with the overage and routinely destroyed far more than needed -- live,
     a 0.2 GB overage cost a 3.82 GB seeder (19x), and the next victim in line was the
@@ -231,7 +243,7 @@ def ensure_space(cap_gb, torrents, st):
     log.info("ensure-space | category %.1f GB > cap %.1f GB (over %.1f GB); %d 0-peer candidate(s); "
              "plan=%s", used / 1e9, cap_gb, over / 1e9, len(victims),
              "smallest sufficient (%.2f GB)" % (disk_bytes(single) / 1e9) if single is not None
-             else "no single candidate covers it; combining smallest-first")
+             else "no single candidate covers it; combining the fewest that do")
     reclaim = 0
     for t in victims:
         if reclaim >= over:
