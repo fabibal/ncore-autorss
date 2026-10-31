@@ -64,6 +64,23 @@ sampling run differ by microseconds (measured: 7 torrents spread over 42 µs) an
 primary key never tied. Time-at-0-peers is now the *secondary* key, where it does fire —
 byte sizes tie exactly.
 
+## Idle seeders go first
+
+Smallest-sufficient says nothing about whether a torrent still earns: it picked by size
+alone, and its tie-break (longest at 0 peers) is near-meaningless because ~95% of the
+seeders are at 0 peers whenever they are sampled. Measured 2026-10-31: 16 completed
+torrents (74 GB) had had no peer activity for 14+ days and 7 (31 GB) for 30+, together
+only 9% / 3% of all upload ever, while the top uploaders had all been active in the
+last 0-4 days. `select_victims` therefore draws from the **idle** candidates
+(`last_activity` older than `TRIM_IDLE_S`, 14 days) first, applying smallest-sufficient
+inside that pool, and only when the idle torrents together cannot cover the overage does
+it consider everyone, as before. Non-idle candidates still follow the pool so a failed
+delete falls through.
+
+Recent activity, not lifetime GB/day, is the signal: a torrent that uploaded a lot in
+its first week and nothing for 50 days has a high lifetime average and earns nothing now.
+The hit-and-run and no-peers/no-downloads protections apply to idle torrents as to the rest.
+
 ## The trim runs every cycle, not only when a download is queued
 
 `autorss.py` spawns `ensure-space` right after the decision loop, **above** the

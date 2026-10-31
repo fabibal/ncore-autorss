@@ -46,6 +46,7 @@ TMDB_TV_MIN_VOTES = 100        # TV votes accrue over seasons, so a real show cl
 SERIES_DAILY_MAX = 3           # series pilot: episodes approved per rolling 24h (disk headroom is ~80 GB)
 SERIES_MAX_BYTES = int(1.5e9)  # series pilot: single 720p episodes only; bigger = season pack / 4K-ish
 SERIES_SHOW_TTL_S = 2 * 24 * 3600  # re-ask TMDB about a show this often (popularity moves)
+TRIM_IDLE_S = 14 * 86400       # a seeder with no peer activity this long is the first to go when the trim must delete
 HNR_MARGIN_S = 2 * 3600        # nCore books seed time from announces (30-44 min lag); trim keeps this much slack
 UNREGISTERED_GRACE_S = 24 * 3600  # tracker must say "unregistered torrent" this long before monitor removes it
 
@@ -187,6 +188,20 @@ def seed_obligation_met(t):
         return True
     needed_s = (1 - ratio) * (48 + 0.4 * downloaded / 1e9) * 3600
     return seeded >= needed_s + HNR_MARGIN_S
+
+
+def is_idle(t, now):
+    """True when no peer has exchanged data with this torrent for TRIM_IDLE_S (qB's
+    last_activity). A torrent qB reports without last_activity is not idle (keeps minimal
+    test fixtures on the plain size rule); last_activity 0 means never active, which counts
+    as idle once the torrent itself is older than the window."""
+    last = t.get("last_activity")
+    if last is None:
+        return False
+    if last <= 0:
+        added = t.get("added_on")
+        return added is not None and now - added >= TRIM_IDLE_S
+    return now - last >= TRIM_IDLE_S
 
 
 def torrent_size(t):

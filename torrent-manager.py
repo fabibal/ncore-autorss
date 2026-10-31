@@ -164,25 +164,37 @@ def delete_torrent(t, st):
 def select_victims(torrents, over, zs, now):
     """Ordered deletion plan for an `over`-byte overage. Candidates are completed 0-peer
     seeders ONLY whose nCore seed obligation is met (a just-downloaded episode at ratio < 1
-    must not be deleted before its hit-and-run time is served), sorted smallest-first
-    (ties broken by longest at 0 peers); the smallest single candidate that alone covers `over` is promoted to the front. Returns
-    (victims, single) where `single` is None when no one candidate covers the overage and
-    they must be combined smallest-first.
+    must not be deleted before its hit-and-run time is served). Idle ones (no peer activity
+    for TRIM_IDLE_S) are chosen from first, since they earn nothing: when they alone cover
+    `over`, the plan draws from them, otherwise from every candidate. Within the pool they
+    are sorted smallest-first (ties broken by longest at 0 peers) and the smallest single
+    one that alone covers `over` is promoted to the front; the other candidates follow so a
+    failed delete falls through. Returns (victims, single) where `single` is None when no
+    one candidate covers the overage and they must be combined smallest-first.
 
     Pure and side-effect-free purely so `dryrun-ensure-space.py` can print the exact plan
     a real run would follow. A dry-run that reimplemented this selection would silently
     drift from it the next time the sort key changes -- and a dry-run that lies is worse
     than none, since its whole job is to be trusted before an irreversible delete."""
-    cands = sorted(
-        (t for t in torrents if peers(t) == 0 and (t.get("progress") or 0) >= 1.0
-         and C.seed_obligation_met(t)),
-        key=lambda t: (disk_bytes(t), zs.get(t.get("hash"), now)),
-    )
-    # The leader covers the overage alone; the rest follow smallest-first so a FAILED
-    # delete still falls through to the next-best option instead of giving up.
-    single = next((t for t in cands if disk_bytes(t) >= over), None)
-    victims = cands if single is None else [single] + [t for t in cands if t is not single]
+    cands = [t for t in torrents if peers(t) == 0 and (t.get("progress") or 0) >= 1.0
+             and C.seed_obligation_met(t)]
+    idle = [t for t in cands if C.is_idle(t, now)]
+    pool = idle if sum(disk_bytes(t) for t in idle) >= over else cands
+    victims, single = _smallest_sufficient(pool, over, zs, now)
+    if pool is not cands:
+        in_pool = {id(t) for t in pool}
+        victims += _smallest_sufficient([t for t in cands if id(t) not in in_pool], over, zs, now)[0]
     return victims, single
+
+
+def _smallest_sufficient(pool, over, zs, now):
+    """`pool` ordered smallest-first (ties: longest at 0 peers) with the smallest single
+    torrent that alone covers `over` promoted to the front; (ordered, that torrent or None).
+    The leader covers the overage alone; the rest follow smallest-first so a FAILED delete
+    still falls through to the next-best option instead of giving up."""
+    ordered = sorted(pool, key=lambda t: (disk_bytes(t), zs.get(t.get("hash"), now)))
+    single = next((t for t in ordered if disk_bytes(t) >= over), None)
+    return (ordered if single is None else [single] + [t for t in ordered if t is not single]), single
 
 
 def ensure_space(cap_gb, torrents, st):

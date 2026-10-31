@@ -35,8 +35,10 @@ tm = _load("torrent_manager", "/home/fbazsa/ncore-autorss/torrent-manager.py")
 
 def describe(t, zs, now):
     dead_d = (now - zs.get(t.get("hash"), now)) / 86400
-    return ("   %6.2f GB | dead %5.1f d | ratio %6.2f | up %7.1f GB | %s"
-            % (tm.disk_bytes(t) / 1e9, dead_d, t.get("ratio") or 0,
+    last = t.get("last_activity") or 0
+    idle_d = (now - last) / 86400 if last > 0 else float("nan")
+    return ("   %6.2f GB | dead %5.1f d | idle %5.1f d | ratio %6.2f | up %7.1f GB | %s"
+            % (tm.disk_bytes(t) / 1e9, dead_d, idle_d, t.get("ratio") or 0,
                (t.get("uploaded") or 0) / 1e9, (t.get("name") or "")[:55]))
 
 
@@ -71,8 +73,9 @@ def main():
 
         print("\ncap %.1f GB | over %.2f GB | %d eligible candidate(s) | plan: %s"
               % (cap, over / 1e9, len(victims),
-                 "smallest sufficient" if single is not None
-                 else "no single candidate covers it; combining smallest-first"))
+                 ("idle-first, " if plan and C.is_idle(plan[0], now) else "")
+                 + ("smallest sufficient" if single is not None
+                    else "no single candidate covers it; combining smallest-first")))
         for t in plan:
             print(describe(t, zs, now))
         if freed < over:

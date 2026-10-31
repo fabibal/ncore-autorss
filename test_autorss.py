@@ -1380,6 +1380,59 @@ class TestRunSeries(unittest.TestCase):
         self.assertEqual(pending, ["f", "s"])
 
 
+class TestIdleFirstTrim(unittest.TestCase):
+    """ensure-space deletes torrents nobody has touched for TRIM_IDLE_S before active ones."""
+    NOW = 2_000_000_000.0
+    GB = 10 ** 9
+
+    def _t(self, h, gb, idle_days=None, **kw):
+        t = _seed(h, int(gb * self.GB))
+        if idle_days is not None:
+            t["last_activity"] = self.NOW - idle_days * 86400
+        t.update(kw)
+        return t
+
+    def _order(self, torrents, over_gb):
+        victims, single = tm.select_victims(torrents, int(over_gb * self.GB), {}, self.NOW)
+        return [t["hash"] for t in victims], single
+
+    def test_is_idle_threshold_and_missing_fields(self):
+        day = 86400
+        self.assertTrue(C.is_idle(self._t("a", 1, idle_days=C.TRIM_IDLE_S / day + 1), self.NOW))
+        self.assertFalse(C.is_idle(self._t("b", 1, idle_days=C.TRIM_IDLE_S / day - 1), self.NOW))
+        self.assertFalse(C.is_idle(_seed("c", 1), self.NOW))                       # no last_activity -> not idle
+        never_old = self._t("d", 1, last_activity=0, added_on=self.NOW - 30 * day)
+        never_new = self._t("e", 1, last_activity=0, added_on=self.NOW - 1 * day)
+        self.assertTrue(C.is_idle(never_old, self.NOW))
+        self.assertFalse(C.is_idle(never_new, self.NOW))
+
+    def test_idle_torrent_goes_before_a_smaller_active_one(self):
+        active_small = self._t("active", 1, idle_days=0.5)
+        idle_big = self._t("idle", 5, idle_days=30)
+        order, single = self._order([active_small, idle_big], over_gb=0.5)
+        self.assertEqual((order, single["hash"]), (["idle", "active"], "idle"))   # plain size rule would pick "active"
+
+    def test_smallest_sufficient_still_applies_inside_the_idle_pool(self):
+        a = self._t("idle6", 6, idle_days=40)
+        b = self._t("idle3", 3, idle_days=40)
+        c = self._t("active1", 1, idle_days=1)
+        order, single = self._order([a, b, c], over_gb=2.5)
+        self.assertEqual((order[0], single["hash"]), ("idle3", "idle3"))
+
+    def test_falls_back_to_every_candidate_when_idle_ones_cannot_cover(self):
+        idle_small = self._t("idle", 1, idle_days=30)
+        active = self._t("active", 8, idle_days=1)
+        order, single = self._order([idle_small, active], over_gb=5)
+        self.assertEqual((order, single["hash"]), (["active", "idle"], "active"))
+
+    def test_idle_torrent_with_peers_or_unmet_obligation_is_never_a_victim(self):
+        with_peers = self._t("peers", 5, idle_days=30, num_seeds=2)
+        unmet = self._t("unmet", 5, idle_days=30, ratio=0.0, seeding_time=3600, downloaded=5 * self.GB)
+        ok = self._t("ok", 2, idle_days=30)
+        order, _ = self._order([with_peers, unmet, ok], over_gb=1)
+        self.assertEqual(order, ["ok"])
+
+
 class TestSeedObligation(unittest.TestCase):
     """nCore hit-and-run: ratio 1.0, or (1 - ratio) * (48 + 0.4 * downloaded_GB) hours of
     seed time. ensure-space only deletes seeders that meet it."""

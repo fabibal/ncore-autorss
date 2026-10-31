@@ -41,6 +41,7 @@ requests get **403 through Docker NAT**, so every qB API call goes via
 | `STALL_TIMEOUT_S` | 6h | peerless download past this = dead, frees a slot |
 | `TMDB_MIN_POPULARITY` / `TMDB_MIN_VOTES` | 30 / 20 | TMDB popularity+votes that approve a film Deepseek rejected |
 | `SERIES_DAILY_MAX` / `SERIES_MAX_BYTES` | 3 / 1.5 GB | series pilot: episodes queued per rolling 24h / max size each |
+| `TRIM_IDLE_S` | 14d | ensure-space deletes seeders idle this long first (smallest sufficient among them) |
 | `HNR_MARGIN_S` | 2h | slack on nCore's hit-and-run seed time before ensure-space may delete a seeder |
 | `UNREGISTERED_GRACE_S` | 24h | tracker says "unregistered torrent" this long -> `monitor` removes it |
 
