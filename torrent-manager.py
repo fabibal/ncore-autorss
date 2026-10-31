@@ -409,11 +409,11 @@ def _epoch(s):
 
 
 def recent_approved_films(limit=50):
-    """Last `limit` Deepseek-approved films (status downloaded or pending), newest first."""
+    """Last `limit` approved films and series episodes (status downloaded or pending), newest first."""
     films = C.load_json(C.STATE_FILE, {"films": {}}).get("films", {})
     rows = []
     for fid, f in films.items():
-        if f.get("decision") is True and f.get("status") != "removed" and f.get("kind") != "series":
+        if f.get("decision") is True and f.get("status") != "removed":
             rows.append({
                 "title": f.get("clean") or f.get("title") or fid,
                 "status": "downloaded" if f.get("status") == "downloaded" else "approved",

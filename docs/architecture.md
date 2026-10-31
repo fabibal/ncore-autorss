@@ -114,7 +114,8 @@ Written to `/home/fbazsa/monitoring/textfile_collector/`, scraped via node_expor
   An **Upload / Download rate (GB/h)** timeseries
   (`rate(...[$__rate_interval])*3600/1e9`, `timeFrom:30d`, legend
   mean/max/last, GB axis), and a markdown text panel
-  **"Utolsó 10 jóváhagyott film"** (description marker `autorss-films-text`).
+  **"Last 50 Approved Films & Series"** (description marker `autorss-films-text`;
+  lists films and series episodes with Source, Size, GB/day).
 - The text panel is auto-refreshed by `update_films_panel`: GET
   `/api/dashboards/uid/<UID>`, mutate the matched panel, POST `/api/dashboards/db`
   with `overwrite:false` + the fetched `version` (optimistic lock). It matches by

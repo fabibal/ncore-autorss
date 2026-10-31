@@ -266,7 +266,7 @@ shows TMDB calls popular (popularity >= 30, >= 100 votes, not reality/news/talk/
 most `SERIES_DAILY_MAX` (3) per rolling 24h, one release per SxxExx. Season packs and
 dated dailies are ignored. Episodes are stored in `state["films"]` with `kind="series"`
 and `size`, so the add loop, reconcile and trim work unchanged; films sort ahead of
-episodes in the pending order, and the film metrics/panel exclude them. Per-show verdicts
+episodes in the pending order, and the film counters exclude them (the recent-approved table lists both, `Source` = series). Per-show verdicts
 are cached 2 days under `state["series"]["shows"]`; a TMDB failure records nothing.
 
 - **It will not reach the 3x tier at the 480 GB cap.** Films (~36 GB/week via TMDB) plus 3

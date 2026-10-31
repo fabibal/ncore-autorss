@@ -1483,13 +1483,14 @@ class TestKindAndSourceMetrics(unittest.TestCase):
 
 
 class TestSeriesMetrics(unittest.TestCase):
-    def test_series_excluded_from_film_metrics(self):
+    def test_series_excluded_from_film_counters_but_listed_in_the_table(self):
         films = {"a": {"decision": True}, "b": {"decision": True, "kind": "series"}}
         real = C.load_json
         C.load_json = lambda p, d: {"films": films}
         try:
-            self.assertEqual(tm.compute_metrics([], {})["approved"], 1)
-            self.assertEqual(len(tm.recent_approved_films()), 1)
+            self.assertEqual(tm.compute_metrics([], {})["approved"], 1)        # film counters stay film-only
+            rows = tm.recent_approved_films()                                    # but the table lists both
+            self.assertEqual(sorted(r["source"] for r in rows), ["deepseek", "series"])
         finally:
             C.load_json = real
 
