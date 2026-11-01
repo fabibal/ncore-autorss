@@ -321,5 +321,9 @@ grafana, for ~85 s), but `~/update-docker.sh` (cron Sunday 04:00), whose last st
 `docker compose pull && up -d` for qBittorrent. The LinuxServer image is rebuilt weekly, so
 the container was recreated on 2026-10-25 and again on 2026-11-01 (04:01 both times).
 That block is now removed from the script (backup at `~/update-docker.sh.bak-20261101`);
-update qBittorrent by hand, rarely, when a new version is wanted.
+update qBittorrent by hand, rarely, when a new version is wanted. The one exception is a
+host reboot, which ends the seeding period anyway: an `@reboot` crontab entry runs
+`~/update-qbittorrent-on-boot.sh` (waits for dockerd, `compose pull`, `up -d`, which
+recreates only if the image changed; log in `~/update.log`). Reboots here are manual and
+rare (last: 2026-10-10), so this updates qBittorrent only when the server is restarted.
 Not covered: stremhu is stopped ~85 s each Sunday by the backup, and it also seeds to nCore.
