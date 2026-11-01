@@ -310,3 +310,16 @@ are cached 2 days under `state["series"]["shows"]`; a TMDB failure records nothi
   vs films added in the same window (young torrents upload ~14x more than old ones, so do
   not compare to the old seeders), from `state.json` (`kind`, `size`, `hash`) and qB's
   `uploaded`.
+
+## qBittorrent is never restarted on a schedule
+
+nCore measures `up(interval)`, `time`, `seedsize` and the count tier over the last 7 days
+*or the uninterrupted seeding period*, so a restart is not free. The Grafana "Uptime"
+panel showed 0.2 days on 2026-11-01. Cause (checked 2026-11-01): not the weekly backup
+(`backup-config.sh`, Sunday 03:00; it stops only stremhu, jellyfin, nginx-proxy-manager and
+grafana, for ~85 s), but `~/update-docker.sh` (cron Sunday 04:00), whose last step ran
+`docker compose pull && up -d` for qBittorrent. The LinuxServer image is rebuilt weekly, so
+the container was recreated on 2026-10-25 and again on 2026-11-01 (04:01 both times).
+That block is now removed from the script (backup at `~/update-docker.sh.bak-20261101`);
+update qBittorrent by hand, rarely, when a new version is wanted.
+Not covered: stremhu is stopped ~85 s each Sunday by the backup, and it also seeds to nCore.
