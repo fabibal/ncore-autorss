@@ -7,7 +7,7 @@ on the server via cron (no Docker compose of its own — it drives the existing
 
 ## Repo map
 
-- `autorss.py` — main pipeline (cron */15 min). RSS fetch → remux/720p pre-filter →
+- `autorss.py` — main pipeline (cron */5 min). RSS fetch → remux/720p pre-filter →
   Deepseek verdict → queue downloads (≤`MAX_ACTIVE_DOWNLOADS`, newest-approved first).
   Series pilot: a few TMDB-popular 720p episodes/day into the same category (`kind=series`).
 - `torrent-manager.py` — `monitor` (cron 2h + called by autorss in `finally`): peer
@@ -37,7 +37,7 @@ requests get **403 through Docker NAT**, so every qB API call goes via
 | `CATEGORY_HARD_GB` | 480 | trim completed 0-peer seeders above this category size |
 | `CATEGORY_CAP_GB` | 500 | hold the queue (don't add) above this |
 | `MAX_ACTIVE_DOWNLOADS` | 3 | concurrent auto-film downloads |
-| `MAX_ADD_ATTEMPTS` | 5 | unconfirmed adds before `status=add_failed` |
+| `MAX_ADD_ATTEMPTS` | 15 | unconfirmed adds before `status=add_failed` (per-run count: 15 x 5 min = 75 min) |
 | `STALL_TIMEOUT_S` | 6h | peerless download past this = dead, frees a slot |
 | `TMDB_MIN_POPULARITY` / `TMDB_MIN_VOTES` | 30 / 20 | TMDB popularity+votes that approve a film Deepseek rejected |
 | `SERIES_DAILY_MAX` / `SERIES_MAX_BYTES` | 3 / 1.5 GB | series pilot: episodes queued per rolling 24h / max size each |

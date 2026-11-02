@@ -9,6 +9,7 @@ manager-state.json
 
 # logs
 *.log
+.logrotate.state
 
 # lock files
 .lock

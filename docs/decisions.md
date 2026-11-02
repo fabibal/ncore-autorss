@@ -99,7 +99,7 @@ run returned at "no pending downloads" without ever reaching the trim. The 2-hou
 `monitor` cron never deletes by design, so nothing else was watching. Hoisting the
 call restores the invariant the docs already claimed (the cap is a cap) and still
 trims before adding — nothing between the new position and the add loop grows the
-category. Cost is one extra no-op manager subprocess per quiet 15-minute run.
+category. Cost is one extra no-op manager subprocess per quiet 5-minute run.
 
 Keeping `monitor` non-deleting was deliberate: it is the command a human runs by hand
 and the one autorss calls from a `finally`, so it must stay safe to invoke anywhere.

@@ -79,13 +79,18 @@ no deletion. `480–500`: trim completed 0-peer seeders toward 480. `> CATEGORY_
 ## Cron schedule
 
 ```cron
-*/15 * * * * /usr/bin/python3 /home/fbazsa/ncore-autorss/autorss.py            >> .../cron.log 2>&1
+*/5  * * * * /usr/bin/python3 /home/fbazsa/ncore-autorss/autorss.py            >> .../cron.log 2>&1
 0   */2 * * * /usr/bin/python3 /home/fbazsa/ncore-autorss/torrent-manager.py monitor >> .../torrent-manager-cron.log 2>&1
 ```
 
 `autorss.py` also invokes the manager twice per run: `ensure-space` after the decision
 loop (before the pending/slot gates, so a run with nothing to add still trims), and
 `monitor` in its `finally`. Manager runs self-exclude via `.manager.lock`.
+
+Logs (`cron.log`, `autorss.log`, `torrent-manager.log`, `torrent-manager-cron.log`) are
+rotated weekly, 8 kept, gzip'd, by a user-level logrotate (no sudo on the host): config
+`logrotate.conf`, state `.logrotate.state` (gitignored), run daily from the user crontab
+(`25 4 * * *`, errors to `logrotate.log`). No `copytruncate`: each cron run reopens the log.
 
 ## Metrics (Prometheus textfile collector)
 
