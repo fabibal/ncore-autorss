@@ -257,11 +257,27 @@ def ensure_space(cap_gb, torrents, st):
         log.info("ensure-space | freed %.1f GB", reclaim / 1e9)
 
 
-def reconcile_state(live_hashes):
+def _added_since(film, read_at):
+    """True if the film was recorded as added at/after `read_at` (second resolution, so a
+    same-second add counts). An unparseable added_ts is treated as old -- the pre-fix
+    behaviour -- rather than shielding a vanished torrent forever."""
+    try:
+        added = datetime.strptime(film["added_ts"][:19], "%Y-%m-%d %H:%M:%S")
+    except (KeyError, TypeError, ValueError):
+        return False
+    return added >= read_at.replace(microsecond=0)
+
+
+def reconcile_state(live_hashes, read_at=None):
     """Mark 'downloaded' films whose torrent is gone from qB as 'removed', so the
     autorss state stays truthful (a torrent deleted outside the manager otherwise
     sticks at status=downloaded forever). Only call with a SUCCESSFUL qB read --
     a transient query failure must not flag everything as removed.
+
+    `read_at` (naive local datetime) is when the qB read behind `live_hashes` began. A
+    film recorded as added at/after it cannot be in that snapshot, so absence proves
+    nothing: autorss may have added it while this run was still working (the 2h cron
+    monitor at :00 races the :00 autorss run). Such films are left for the next run.
 
     Goes through the shared, locked read-modify-write so it can't clobber a concurrent
     autorss writer (e.g. the autorss run that spawned this ensure-space subprocess)."""
@@ -269,6 +285,8 @@ def reconcile_state(live_hashes):
     def _mut(state):
         for fid, f in state.get("films", {}).items():
             if f.get("status") == "downloaded" and f.get("hash") and f["hash"] not in live_hashes:
+                if read_at is not None and _added_since(f, read_at):
+                    continue
                 f["status"] = "removed"
                 f["removed_ts"] = now_iso()
                 changed.append(fid)
@@ -587,6 +605,7 @@ def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "monitor"
     st = C.load_json(MGR_STATE, {"zero_since": {}, "deleted_total": 0, "deleted_log": []})
 
+    read_at = datetime.now()  # earliest qB read of this run: bounds what reconcile may call "gone"
     torrents = fetch_auto_torrents()
     qb_ok = torrents is not None
     if qb_ok:
@@ -617,7 +636,7 @@ def main():
     # metrics file and timers untouched so a transient timeout doesn't collapse the
     # live gauges (disk/seeding) to zero and flap the dashboard.
     if qb_ok:
-        reconcile_state({t.get("hash") for t in torrents})
+        reconcile_state({t.get("hash") for t in torrents}, read_at)
         m = compute_metrics(torrents, st)
         write_metrics(m)
         update_films_panel(st, torrents)

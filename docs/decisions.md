@@ -105,6 +105,16 @@ Keeping `monitor` non-deleting was deliberate: it is the command a human runs by
 and the one autorss calls from a `finally`, so it must stay safe to invoke anywhere.
 `ensure-space` remains the single command that can delete.
 
+## Reconcile must not judge a film added after its qB snapshot
+
+`reconcile_state` flags a `downloaded` film whose hash is missing from the qB list as
+`removed`. The 2h cron `monitor` fires at :00, the same minute as an autorss run: it read
+qB at 12:00:02, autorss added Primetime (2026) at 12:00:04, and the monitor then reconciled
+its stale snapshot against the fresh state and marked the new film `removed` (2026-11-03).
+Because `removed` does not block re-acquisition, a second release was later downloaded.
+`main()` now records `read_at` before its first qB read and `reconcile_state` skips films
+whose `added_ts` is at or after it; a genuinely vanished one is caught on the next run.
+
 ## Never auto-stop seeding (`ratioLimit=-1`, `seedingTimeLimit=-1`)
 
 Set per-torrent on add (and back-filled onto existing torrents). A paused/stopped

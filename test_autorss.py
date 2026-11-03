@@ -522,6 +522,56 @@ class TestMutateState(unittest.TestCase):
         self.assertIn("B", disk["films"])
 
 
+class TestReconcileRace(unittest.TestCase):
+    """2026-11-03 Primetime: the 2h cron monitor read qB at 12:00:02, autorss added a
+    torrent at 12:00:04 and recorded it as downloaded, then the monitor reconciled its
+    stale snapshot and flagged the brand-new film 'removed' (so a second release of the
+    same title was later downloaded again). A film added after the read must be spared."""
+
+    READ_AT = tm.datetime(2026, 11, 3, 12, 0, 2, 900000)
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._sf, self._lf = C.STATE_FILE, C.STATE_LOCK_FILE
+        C.STATE_FILE = os.path.join(self.dir, "state.json")
+        C.STATE_LOCK_FILE = os.path.join(self.dir, ".state.lock")
+
+    def tearDown(self):
+        C.STATE_FILE, C.STATE_LOCK_FILE = self._sf, self._lf
+
+    def _status(self, films, live, read_at):
+        C.mutate_state(lambda s: s["films"].update(films))
+        tm.reconcile_state(live, read_at)
+        return {k: v["status"] for k, v in C.load_json(C.STATE_FILE, {})["films"].items()}
+
+    def _film(self, h, added_ts):
+        return {"status": "downloaded", "hash": h, "added_ts": added_ts}
+
+    def test_film_added_after_the_read_is_spared(self):
+        st = self._status({"new": self._film("h1", "2026-11-03 12:00:06")}, set(), self.READ_AT)
+        self.assertEqual(st["new"], "downloaded")
+
+    def test_same_second_as_the_read_is_spared(self):
+        st = self._status({"x": self._film("h1", "2026-11-03 12:00:02")}, set(), self.READ_AT)
+        self.assertEqual(st["x"], "downloaded")
+
+    def test_film_added_before_the_read_and_missing_is_removed(self):
+        st = self._status({"old": self._film("h1", "2026-11-03 11:00:00")}, set(), self.READ_AT)
+        self.assertEqual(st["old"], "removed")
+
+    def test_live_film_is_untouched(self):
+        st = self._status({"live": self._film("h1", "2026-11-03 11:00:00")}, {"h1"}, self.READ_AT)
+        self.assertEqual(st["live"], "downloaded")
+
+    def test_unparseable_added_ts_keeps_old_behaviour(self):
+        st = self._status({"bad": self._film("h1", "garbage")}, set(), self.READ_AT)
+        self.assertEqual(st["bad"], "removed")
+
+    def test_without_read_at_behaviour_is_unchanged(self):
+        st = self._status({"new": self._film("h1", "2026-11-03 12:00:06")}, set(), None)
+        self.assertEqual(st["new"], "removed")
+
+
 def _seed(h, size, seeds=0, progress=1.0, uploaded=0):
     return {"hash": h, "name": h, "size": size,
             "completed": size if progress >= 1.0 else int(size * progress),
