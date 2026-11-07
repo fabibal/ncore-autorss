@@ -1618,5 +1618,17 @@ class TestSeriesMetrics(unittest.TestCase):
             C.load_json = real
 
 
+class TestRejectedMetric(unittest.TestCase):
+    def test_quality_skips_are_not_counted_as_rejections(self):
+        films = {"a": {"decision": False, "status": "rejected"},
+                 "b": {"decision": False, "status": "skipped"}}
+        real = C.load_json
+        C.load_json = lambda p, d: {"films": films}
+        try:
+            self.assertEqual(tm.compute_metrics([], {})["rejected"], 1)
+        finally:
+            C.load_json = real
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

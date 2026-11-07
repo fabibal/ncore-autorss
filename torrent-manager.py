@@ -370,7 +370,8 @@ def compute_metrics(torrents, st):
                             for k in KINDS},
         "approved": sum(1 for f in films.values()
                         if f.get("decision") is True and f.get("kind") != "series"),
-        "rejected": sum(1 for f in films.values() if f.get("decision") is False),
+        "rejected": sum(1 for f in films.values()
+                        if f.get("decision") is False and f.get("status") != "skipped"),
         "active": sum(1 for t in torrents if is_active_download(t)),
         # Incomplete, not deliberately stopped, and no longer counted as active -- i.e.
         # exactly what is_active_download has written off as dead. Sharing that predicate
