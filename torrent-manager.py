@@ -5,8 +5,9 @@ Modes:
   monitor                 (default; cron every 2h, and called by autorss after each run)
                           Sample peer counts, update 0-peer timers, write the Prometheus
                           textfile metrics, refresh the Grafana "recent films" text panel.
-                          Deletes only completed 0-peer torrents whose tracker has said
-                          "unregistered torrent" for UNREGISTERED_GRACE_S (24h).
+                          Deletes only torrents whose tracker has said "unregistered
+                          torrent" for UNREGISTERED_GRACE_S (24h): completed ones with 0
+                          peers, or incomplete ones (they can never finish; peers or not).
   ensure-space [CAP_GB]   Called by autorss before adding a torrent. If the auto-film
                           CATEGORY's committed size exceeds CAP_GB, delete the SMALLEST
                           SUFFICIENT completed 0-peer seeders (smallest single candidate
@@ -95,7 +96,7 @@ def tracker_unregistered(h):
 
 
 def update_unregistered_timers(torrents, st, check=tracker_unregistered):
-    """Track when each completed torrent was first seen "unregistered" on its tracker;
+    """Track when each torrent was first seen "unregistered" on its tracker;
     clear the timer as soon as an announce stops saying so, so a transient tracker outage
     never accumulates toward a removal. A failed lookup leaves the timer as it was."""
     us = st.setdefault("unregistered_since", {})
@@ -103,9 +104,6 @@ def update_unregistered_timers(torrents, st, check=tracker_unregistered):
     for t in torrents:
         h = t.get("hash")
         present.add(h)
-        if (t.get("progress") or 0) < 1.0:
-            us.pop(h, None)
-            continue
         verdict = check(h)
         if verdict is None:
             continue
@@ -119,9 +117,11 @@ def update_unregistered_timers(torrents, st, check=tracker_unregistered):
 
 
 def remove_unregistered(torrents, st, now=None):
-    """Delete completed 0-peer torrents the tracker has called "unregistered" for at least
-    UNREGISTERED_GRACE_S: nCore books no upload for them, so they only hold disk. Never
-    touches a torrent with peers or one still downloading. Returns the number deleted."""
+    """Delete torrents the tracker has called "unregistered" for at least UNREGISTERED_GRACE_S:
+    nCore books no upload for them, so they only hold disk. A completed one is spared while
+    it has peers; an incomplete one is not -- the torrent is gone from nCore so it can never
+    finish, its peers are equally stuck, and it would hold a download slot forever.
+    Returns the number deleted."""
     us = st.get("unregistered_since", {})
     now = time.time() if now is None else now
     removed = 0
@@ -129,7 +129,7 @@ def remove_unregistered(torrents, st, now=None):
         since = us.get(t.get("hash"))
         if since is None or now - since < C.UNREGISTERED_GRACE_S:
             continue
-        if peers(t) != 0 or (t.get("progress") or 0) < 1.0:
+        if (t.get("progress") or 0) >= 1.0 and peers(t) != 0:
             continue
         log.info("UNREGISTERED | %r unregistered since %s", (t.get("name") or "")[:70],
                  datetime.fromtimestamp(since).strftime("%Y-%m-%d %H:%M"))

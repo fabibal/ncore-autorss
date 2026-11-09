@@ -251,12 +251,18 @@ When nCore drops a torrent, the tracker answers `unregistered torrent` and books
 upload for it, so it only holds disk (14 such torrents, 81 GB, were found 2026-10-28
 with 0 peers each). `torrent-manager.py monitor` now stamps each completed torrent
 whose tracker says so (`unregistered_since`, manager-state.json) and deletes it with its
-files once that has held for `UNREGISTERED_GRACE_S` (24h) and it has 0 peers.
+files once that has held for `UNREGISTERED_GRACE_S` (24h) and, if completed, it has 0 peers.
+
+Incomplete torrents are covered too (2026-11-09): `The.Odyssey.2026` sat at 0% for 44h,
+"unregistered", with 1 stuck leecher -- it held a download slot because neither the peerless
+nor the `dead_swarm` stall rule fired (`num_complete=1` from the tracker, availability 0).
+A torrent nCore dropped can never finish and its peers are equally stuck, so the peers guard
+does not apply to incomplete ones.
 
 The timer clears the moment an announce stops saying "unregistered", and a failed
 tracker lookup leaves it untouched, so a transient nCore outage never adds up toward a
-deletion; 24h outlasts a day-long outage. The same rule as the space trim applies:
-never a torrent with peers or one still downloading. The old `t.ncore.pro` "Host not
+deletion; 24h outlasts a day-long outage. The space trim's rule still holds for it:
+never a completed torrent with peers. The old `t.ncore.pro` "Host not
 found" tracker error is NOT a trigger -- only the literal "unregistered" message is.
 
 ## TMDB adds approvals on top of Deepseek

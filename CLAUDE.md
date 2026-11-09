@@ -52,7 +52,7 @@ is a last resort. Filter regexes, `MAX_YEAR`, and the status sets live in `autor
 
 ```bash
 python3 test_autorss.py                       # tests (stdlib, no deps)
-python3 torrent-manager.py monitor            # refresh metrics + Grafana panel; removes 24h-unregistered 0-peer seeders
+python3 torrent-manager.py monitor            # refresh metrics + Grafana panel; removes 24h-unregistered torrents (0-peer seeders, or any incomplete one)
 python3 dryrun-ensure-space.py [CAP_GB ...]   # what a trim WOULD delete (read-only)
 python3 torrent-manager.py ensure-space 480   # manual trim to a cap (GB)
 python3 autorss.py                            # one pipeline run

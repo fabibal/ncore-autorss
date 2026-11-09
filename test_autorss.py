@@ -986,7 +986,7 @@ class TestTorrentStatsPerDay(unittest.TestCase):
 
 class TestRemoveUnregistered(unittest.TestCase):
     """A torrent the tracker calls "unregistered" earns no ERTEK, so monitor removes it --
-    but only after UNREGISTERED_GRACE_S, only when it is a completed 0-peer seeder, and a
+    but only after UNREGISTERED_GRACE_S, a completed seeder only when it has 0 peers, and a
     recovered or unreadable tracker never counts toward the grace."""
 
     def setUp(self):
@@ -1012,11 +1012,17 @@ class TestRemoveUnregistered(unittest.TestCase):
         self.assertEqual((n, self.deleted), (1, ["a"]))
         self.assertNotIn("a", st["unregistered_since"])
 
-    def test_torrent_with_peers_or_still_downloading_is_protected(self):
-        st = {"unregistered_since": {"peers": self.t0, "dl": self.t0}}
-        torrents = [_seed("peers", 10 ** 9, seeds=1), _seed("dl", 10 ** 9, progress=0.4)]
-        n = tm.remove_unregistered(torrents, st, now=self.t0 + 10 * C.UNREGISTERED_GRACE_S)
+    def test_completed_torrent_with_peers_is_protected(self):
+        st = {"unregistered_since": {"peers": self.t0}}
+        n = tm.remove_unregistered([_seed("peers", 10 ** 9, seeds=1)], st, now=self.t0 + 10 * C.UNREGISTERED_GRACE_S)
         self.assertEqual((n, self.deleted), (0, []))
+
+    def test_incomplete_torrent_is_deleted_after_grace_even_with_peers(self):
+        st = {"unregistered_since": {"dl": self.t0}}
+        torrents = [_seed("dl", 10 ** 9, progress=0.0, seeds=1)]
+        self.assertEqual(tm.remove_unregistered(torrents, st, now=self.t0 + C.UNREGISTERED_GRACE_S - 1), 0)
+        n = tm.remove_unregistered(torrents, st, now=self.t0 + C.UNREGISTERED_GRACE_S)
+        self.assertEqual((n, self.deleted), (1, ["dl"]))
 
     def test_timer_starts_once_and_is_not_reset_while_still_unregistered(self):
         st = {}
@@ -1035,10 +1041,10 @@ class TestRemoveUnregistered(unittest.TestCase):
         self._timers({"a": None, "b": None}, [_seed("a", 10 ** 9), _seed("b", 10 ** 9)], st)
         self.assertEqual(st["unregistered_since"], {"a": self.t0})
 
-    def test_departed_and_incomplete_torrents_are_dropped_from_timers(self):
-        st = {"unregistered_since": {"gone": self.t0, "dl": self.t0}}
+    def test_incomplete_torrent_gets_a_timer_but_departed_ones_are_dropped(self):
+        st = {"unregistered_since": {"gone": self.t0}}
         self._timers({"dl": True}, [_seed("dl", 10 ** 9, progress=0.4)], st)
-        self.assertEqual(st["unregistered_since"], {})
+        self.assertEqual(list(st["unregistered_since"]), ["dl"])
 
     def test_tracker_unregistered_reads_the_message(self):
         real = tm.docker_curl
