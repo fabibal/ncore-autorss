@@ -34,8 +34,8 @@ requests get **403 through Docker NAT**, so every qB API call goes via
 
 | Const | Value | Meaning |
 |---|---|---|
-| `CATEGORY_HARD_GB` | 480 | trim completed 0-peer seeders above this category size |
-| `CATEGORY_CAP_GB` | 500 | hold the queue (don't add) above this |
+| `CATEGORY_HARD_GB` | 600 | trim completed 0-peer seeders above this category size |
+| `CATEGORY_CAP_GB` | 620 | hold the queue (don't add) above this |
 | `MAX_ACTIVE_DOWNLOADS` | 3 | concurrent auto-film downloads |
 | `MAX_ADD_ATTEMPTS` | 15 | unconfirmed adds before `status=add_failed` (per-run count: 15 x 5 min = 75 min) |
 | `STALL_TIMEOUT_S` | 6h | peerless download past this = dead, frees a slot |
@@ -54,7 +54,7 @@ is a last resort. Filter regexes, `MAX_YEAR`, and the status sets live in `autor
 python3 test_autorss.py                       # tests (stdlib, no deps)
 python3 torrent-manager.py monitor            # refresh metrics + Grafana panel; removes 24h-unregistered torrents (0-peer seeders, or any incomplete one)
 python3 dryrun-ensure-space.py [CAP_GB ...]   # what a trim WOULD delete (read-only)
-python3 torrent-manager.py ensure-space 480   # manual trim to a cap (GB)
+python3 torrent-manager.py ensure-space 600   # manual trim to a cap (GB)
 python3 autorss.py                            # one pipeline run
 docker exec qbittorrent curl -s "http://localhost:8080/api/v2/torrents/info?category=auto-film"
 ```

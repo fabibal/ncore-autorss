@@ -343,3 +343,12 @@ host reboot, which ends the seeding period anyway: an `@reboot` crontab entry ru
 recreates only if the image changed; log in `~/update.log`). Reboots here are manual and
 rare (last: 2026-10-10), so this updates qBittorrent only when the server is restarted.
 Not covered: stremhu is stopped ~85 s each Sunday by the backup, and it also seeds to nCore.
+
+## Category limit raised 480 -> 600 GB (2026-11-11)
+
+The category sat on the 480 GB limit and every add evicted a seeder; the idle-first
+pool was down to 6 torrents (23 GB), after which the trim would start deleting seeders
+that still upload. The host had ~763 GB free, so `CATEGORY_HARD_GB` went to 600 and
+`CATEGORY_CAP_GB` to 620 (keeps the 20 GB gap: the queue-hold cap must stay above the
+trim limit, or adding would stop before the trim ever fires). Older 480/500 figures in
+this file describe the situation at the time.

@@ -30,8 +30,8 @@ QB_CATEGORY = "auto-film"
 # space): above CATEGORY_HARD_GB the manager trims 0-peer torrents back toward it;
 # above CATEGORY_CAP_GB autorss holds the queue (won't add) -- the fallback for when
 # 0-peer deletion alone can't keep the category under the hard limit.
-CATEGORY_HARD_GB = 480.0  # hard: above this, delete 0-peer torrents down toward this size
-CATEGORY_CAP_GB = 500.0   # soft cap: above this, hold the queue (don't download)
+CATEGORY_HARD_GB = 600.0  # hard: above this, delete 0-peer torrents down toward this size
+CATEGORY_CAP_GB = 620.0   # soft cap: above this, hold the queue (don't download)
 MAX_ACTIVE_DOWNLOADS = 3  # concurrent auto-film downloads (was effectively 1) -> faster count growth + catches upload peaks
 MAX_ADD_ATTEMPTS = 15     # give up a pending film after this many unconfirmed adds (avoid retrying a dead URL forever); counted per 5-min run = 75 min
 MAX_DECIDE_ATTEMPTS = 15  # give up asking Deepseek after this many failed calls (avoid retrying a bad title forever); counted per 5-min run = 75 min

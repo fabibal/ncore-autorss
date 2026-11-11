@@ -71,9 +71,9 @@ quality pre-filter — a different-quality variant may still qualify), `add_fail
 ## Disk / category policy
 
 Bounded by the auto-film **category's committed size** (`category_used_bytes`, full
-`size` not partial `completed`), not host free space. `< CATEGORY_HARD_GB (480)`:
-no deletion. `480–500`: trim completed 0-peer seeders toward 480. `> CATEGORY_CAP_GB
-(500)` and can't trim: hold the queue, add nothing. `/data/torrents` lives on `/`
+`size` not partial `completed`), not host free space. `< CATEGORY_HARD_GB (600)`:
+no deletion. `600–620`: trim completed 0-peer seeders toward 600. `> CATEGORY_CAP_GB
+(620)` and can't trim: hold the queue, add nothing. `/data/torrents` lives on `/`
 (~1.8 TB, shared with the OS).
 
 ## Cron schedule
