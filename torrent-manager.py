@@ -139,6 +139,20 @@ def remove_unregistered(torrents, st, now=None):
     return removed
 
 
+def deletion_facts(t, now=None):
+    """What a deleted torrent had earned: ratio, uploaded GB, seed days and idle days (days
+    since qB's last_activity, or since it was added when it never had any; None when qB
+    gave neither). Logged at deletion so the choice can be audited afterwards -- the idle-first
+    trim rule cannot otherwise be checked once the torrent is gone."""
+    now = time.time() if now is None else now
+    last = t.get("last_activity") or 0
+    since = last if last > 0 else t.get("added_on")
+    return {"ratio": round(t.get("ratio") or 0.0, 2),
+            "up_gb": round((t.get("uploaded") or 0) / 1e9, 2),
+            "seed_days": round((t.get("seeding_time") or 0) / 86400.0, 1),
+            "idle_days": round((now - since) / 86400.0, 1) if since else None}
+
+
 def delete_torrent(t, st):
     h = t.get("hash")
     rc, out, err = docker_curl(
@@ -148,14 +162,18 @@ def delete_torrent(t, st):
     )
     code = (out or "").strip()
     if rc == 0 and code == "200":
+        facts = deletion_facts(t)
         st["deleted_total"] = st.get("deleted_total", 0) + 1
         st.setdefault("deleted_log", []).append(
             {"ts": now_iso(), "name": (t.get("name") or "")[:90], "hash": h,
-             "size_gb": round(disk_bytes(t) / 1e9, 2)}
+             "size_gb": round(disk_bytes(t) / 1e9, 2), **facts}
         )
         st["deleted_log"] = st["deleted_log"][-50:]
         st.get("zero_since", {}).pop(h, None)
-        log.info("DELETED | %r (%.2f GB, 0 peers)", (t.get("name") or "")[:70], disk_bytes(t) / 1e9)
+        idle = facts["idle_days"]
+        log.info("DELETED | %r (%.2f GB, 0 peers) ratio=%.2f up=%.1fGB seeded=%.1fd idle=%s",
+                 (t.get("name") or "")[:70], disk_bytes(t) / 1e9, facts["ratio"], facts["up_gb"],
+                 facts["seed_days"], "?" if idle is None else "%.1fd" % idle)
         return True
     log.error("DELETE FAILED | %r http=%s err=%s", (t.get("name") or "")[:70], code, err.strip()[:80])
     return False

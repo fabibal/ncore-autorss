@@ -41,6 +41,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -1634,6 +1635,37 @@ class TestRejectedMetric(unittest.TestCase):
             self.assertEqual(tm.compute_metrics([], {})["rejected"], 1)
         finally:
             C.load_json = real
+
+
+class TestDeletionFacts(unittest.TestCase):
+    NOW = 1_000_000_000
+
+    def test_idle_days_count_from_last_activity(self):
+        t = {"ratio": 4.036, "uploaded": 12.9e9, "seeding_time": 62 * 86400,
+             "last_activity": self.NOW - 17.4 * 86400, "added_on": self.NOW - 90 * 86400}
+        self.assertEqual(tm.deletion_facts(t, self.NOW),
+                         {"ratio": 4.04, "up_gb": 12.9, "seed_days": 62.0, "idle_days": 17.4})
+
+    def test_never_active_counts_idle_from_added(self):
+        t = {"last_activity": 0, "added_on": self.NOW - 3 * 86400}
+        self.assertEqual(tm.deletion_facts(t, self.NOW)["idle_days"], 3.0)
+
+    def test_unknown_idle_is_none_not_a_crash(self):
+        self.assertIsNone(tm.deletion_facts({}, self.NOW)["idle_days"])
+
+    def test_delete_logs_and_records_the_facts(self):
+        t = {"hash": "h1", "name": "X", "size": 2e9, "ratio": 1.5, "uploaded": 3e9,
+             "seeding_time": 86400, "last_activity": time.time() - 20 * 86400}
+        st = {}
+        real = tm.docker_curl
+        tm.docker_curl = lambda args, timeout=40: (0, "200", "")
+        try:
+            with self.assertLogs("torrent-manager", level="INFO") as cm:
+                self.assertTrue(tm.delete_torrent(t, st))
+        finally:
+            tm.docker_curl = real
+        self.assertIn("ratio=1.50 up=3.0GB seeded=1.0d idle=20.0d", cm.output[0])
+        self.assertEqual(st["deleted_log"][0]["idle_days"], 20.0)
 
 
 if __name__ == "__main__":
