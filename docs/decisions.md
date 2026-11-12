@@ -327,6 +327,18 @@ are cached 2 days under `state["series"]["shows"]`; a TMDB failure records nothi
   not compare to the old seeders), from `state.json` (`kind`, `size`, `hash`) and qB's
   `uploaded`.
 
+## Watchlist (follow a specific show)
+
+`watchlist.json` entries (`name`, `since`, `have` = episodes fetched by hand) are matched
+accent/case/separator-insensitively against the release's show part (`Kutyaval.vagyok` ==
+`Kutyával vagyok`). `plan_watch` queues each new single episode regardless of resolution
+(smallest release per SxxExx, <= `WATCH_MAX_BYTES`, no remux/packs), bypassing TMDB and the
+pilot's `SERIES_DAILY_MAX` (records carry `watch=<name>`, which the quota ignores). The show's
+length is unknown for hobby picks, so the end is inferred: no episode queued for
+`WATCH_IDLE_S` (28d, covers a mid-season break) -> `autorss` removes the entry from the file.
+The downloaded episodes are ordinary `auto-film` seeders (trim handles them); nothing else
+is left behind.
+
 ## qBittorrent is never restarted on a schedule
 
 nCore measures `up(interval)`, `time`, `seedsize` and the count tier over the last 7 days

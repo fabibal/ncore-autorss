@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -227,6 +228,69 @@ def parse_episode(title):
     return (show, year, int(m.group("s")), int(m.group("e"))) if show else None
 
 
+def _norm_show(name):
+    """Accent-, case- and separator-insensitive show key, so 'Kutyaval.vagyok' (scene
+    release) and 'Kutyával vagyok' (watchlist entry) are the same show."""
+    base = unicodedata.normalize("NFKD", name.casefold())
+    return re.sub(r"[^a-z0-9]+", "", "".join(c for c in base if not unicodedata.combining(c)))
+
+
+def load_watchlist():
+    """[{"name", "since": 'YYYY-MM-DD', "have": ["S01E01", ...]}] from WATCH_FILE; a missing
+    or unreadable file means no watchlist."""
+    shows = C.load_json(C.WATCH_FILE, {}).get("shows", [])
+    return [w for w in shows if isinstance(w, dict) and w.get("name")]
+
+
+def _watch_last_ts(w, films):
+    """Last sign of life of a watched show: its `since` date or the newest episode queued
+    for it, whichever is later."""
+    stamps = [(w.get("since") or "") + " 00:00:00"] + [
+        v.get("asked_ts") or "" for v in films.values() if v.get("watch") == w["name"]]
+    return max(stamps)
+
+
+def expire_watchlist(watch, films, now_ts=None):
+    """(kept, dropped): a show with no episode queued for WATCH_IDLE_S is finished (or
+    dead), so it leaves the list instead of lingering forever."""
+    now_ts = time.time() if now_ts is None else now_ts
+    cutoff = datetime.fromtimestamp(now_ts - C.WATCH_IDLE_S).strftime("%Y-%m-%d %H:%M:%S")
+    kept = [w for w in watch if _watch_last_ts(w, films) > cutoff]
+    return kept, [w for w in watch if w not in kept]
+
+
+def plan_watch(items, state, watch):
+    """Watchlist: -> {torrent_id: record} queuing every new single episode of a watched
+    show in whatever resolution is on the feed (smallest release per SxxExx), with no
+    TMDB/popularity gate and outside the pilot's daily quota. Episodes in the entry's
+    `have` list (downloaded by hand) and ones already in state are skipped."""
+    films = state["films"]
+    seen = seen_clean_titles(films)
+    new = {}
+    for it in sorted(items, key=lambda i: i.get("size", 0)):
+        title = it["title"]
+        if it["id"] in films or it["id"] in new:
+            continue
+        nt = _norm_show(title)
+        w = next((w for w in watch if _norm_show(w["name"]) in nt), None)
+        if w is None:
+            continue
+        ep = parse_episode(title)
+        if not ep or _norm_show(ep[0]) != _norm_show(w["name"]) or REMUX_RE.search(title) \
+                or not 0 < it.get("size", 0) <= C.WATCH_MAX_BYTES:
+            continue
+        _, _, season, episode = ep
+        tag = "S%02dE%02d" % (season, episode)
+        clean = "%s %s" % (w["name"], tag)
+        if tag in {h.upper() for h in w.get("have", [])} or dedup_key(clean) in seen:
+            continue
+        new[it["id"]] = {"title": title, "clean": clean, "decision": True, "reason": "watchlist",
+                         "status": "pending", "link": it["link"], "asked_ts": now(),
+                         "kind": "series", "size": it["size"], "watch": w["name"]}
+        seen.add(dedup_key(clean))
+    return new
+
+
 def plan_series(items, state, tok, lookup=None, now_ts=None):
     """Series pilot. -> (new_recs {torrent_id: record}, show_updates {show_key: verdict},
     failed). Queues up to SERIES_DAILY_MAX single 720p episodes per rolling 24h of shows
@@ -242,7 +306,8 @@ def plan_series(items, state, tok, lookup=None, now_ts=None):
     day_ago = datetime.fromtimestamp(now_ts - 24 * 3600).strftime("%Y-%m-%d %H:%M:%S")
     quota = C.SERIES_DAILY_MAX - sum(
         1 for v in films.values()
-        if v.get("kind") == "series" and v.get("decision") is True and (v.get("asked_ts") or "") >= day_ago)
+        if v.get("kind") == "series" and not v.get("watch") and v.get("decision") is True
+        and (v.get("asked_ts") or "") >= day_ago)
     seen = seen_clean_titles(films)
     new, updates = {}, {}
     for it in items:
@@ -529,6 +594,22 @@ def _run():
         seen_clean.add(key)
         log.info("DECISION%s | %r -> download=%s | reason=%r",
                  " (cached)" if cached else "", clean, decision, reason)
+
+    # Watchlist: every new episode of the shows in watchlist.json (no TMDB needed); a show
+    # with no new episode for WATCH_IDLE_S is dropped from the file.
+    watch = load_watchlist()
+    if watch:
+        kept, dropped = expire_watchlist(watch, state["films"])
+        for w in dropped:
+            log.info("WATCH | %r: no new episode for %d days, removed from the watchlist",
+                     w["name"], C.WATCH_IDLE_S // 86400)
+        if dropped:
+            C.save_json(C.WATCH_FILE, {"shows": kept})
+        new_eps = plan_watch(series, state, kept) if series else {}
+        if new_eps:
+            state = C.mutate_state(lambda s, n=new_eps: s["films"].update(n))
+        for rec in new_eps.values():
+            log.info("WATCH | %r (%.2f GB) queued", rec["clean"], rec["size"] / 1e9)
 
     # Series pilot: TMDB-popular single episodes, a few per day (needs the TMDB token).
     if tmdb_tok and not tmdb_down and series:

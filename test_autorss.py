@@ -1402,6 +1402,57 @@ class TestPlanSeries(unittest.TestCase):
             self.assertIsNone(tmdb.show_qualifies({"popularity": 500.0, "vote_count": 5000, "genre_ids": [g]}))
 
 
+class TestWatchlist(unittest.TestCase):
+    """Watched shows: every new single episode, any resolution, no TMDB, no pilot quota;
+    hand-downloaded episodes are skipped; an idle show leaves the list."""
+    W = [{"name": "Kutyával vagyok", "since": "2026-11-12", "have": ["S01E01", "S01E04"]}]
+
+    def _item(self, i, title, size=int(2e9)):
+        return {"id": str(i), "title": title + " [Sorozat (HUN HD)]", "link": "http://l/%d" % i, "size": size}
+
+    def _plan(self, items, state=None, watch=None):
+        return autorss.plan_watch(items, state or {"films": {}}, watch or self.W)
+
+    def test_new_episode_queued_despite_accents_and_1080p(self):
+        new = self._plan([self._item(1, "Kutyaval.vagyok.S01E05.1080p.WEB-DL.H264-X")])
+        rec = new["1"]
+        self.assertEqual((rec["clean"], rec["kind"], rec["status"], rec["watch"], rec["size"]),
+                         ("Kutyával vagyok S01E05", "series", "pending", "Kutyával vagyok", int(2e9)))
+
+    def test_have_state_pack_remux_other_show_and_oversize_are_skipped(self):
+        state = {"films": {"9": {"clean": "Kutyával vagyok S01E06", "status": "downloaded"}}}
+        items = [self._item(1, "Kutyaval.vagyok.S01E04.720p.WEB"),
+                 self._item(2, "Kutyaval.vagyok.S01E06.720p.WEB"),
+                 self._item(3, "Kutyaval.vagyok.S01.720p.WEB"),
+                 self._item(4, "Kutyaval.vagyok.S01E07.REMUX.1080p"),
+                 self._item(5, "Kutyaval.vagyok.2.S01E08.720p.WEB"),
+                 self._item(6, "Kutyaval.vagyok.S01E09.1080p.WEB", size=int(6e9))]
+        self.assertEqual(self._plan(items, state), {})
+
+    def test_one_release_per_episode_smallest_wins(self):
+        new = self._plan([self._item(1, "Kutyaval.vagyok.S01E05.1080p.WEB", size=int(2.7e9)),
+                          self._item(2, "Kutyaval.vagyok.S01E05.720p.WEB", size=int(1.5e9))])
+        self.assertEqual(list(new), ["2"])
+
+    def test_watch_episodes_do_not_use_the_pilot_quota(self):
+        now_ts = 1_800_000_000.0
+        ts = autorss.datetime.fromtimestamp(now_ts - 3600).strftime("%Y-%m-%d %H:%M:%S")
+        films = {str(i): {"kind": "series", "watch": "X", "decision": True, "asked_ts": ts} for i in range(5)}
+        seen = {"popularity": 155.0, "vote_count": 6272, "genre_ids": [18]}
+        item = {"id": "50", "title": "Hit.Show.S01E02.720p.WEB-DL.H264-X [Sorozat (ENG HD)]",
+                "link": "l", "size": int(1e9)}
+        new, _, _ = autorss.plan_series([item], {"films": films}, "tok", lambda n, y, t: seen, now_ts)
+        self.assertIn("50", new)
+
+    def test_idle_show_expires_active_one_stays(self):
+        now_ts = autorss.datetime(2026, 12, 20).timestamp()
+        films = {"1": {"watch": "Kutyával vagyok", "asked_ts": "2026-12-10 08:00:00"}}
+        kept, dropped = autorss.expire_watchlist(self.W, films, now_ts)
+        self.assertEqual((kept, dropped), (self.W, []))
+        kept, dropped = autorss.expire_watchlist(self.W, films, autorss.datetime(2027, 1, 20).timestamp())
+        self.assertEqual((kept, dropped), ([], self.W))
+
+
 class TestRunSeries(unittest.TestCase):
     """_run wiring of the series pilot, on top of TestRunTmdbWiring's harness."""
 

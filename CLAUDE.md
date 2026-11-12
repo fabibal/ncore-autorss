@@ -14,6 +14,7 @@ on the server via cron (no Docker compose of its own — it drives the existing
   sampling, metrics, state reconcile, Grafana panel, up/down accumulators.
   `ensure-space [CAP_GB]`: trim completed 0-peer seeders when the category is over cap.
   **Never deletes a torrent with peers or one still downloading.**
+- `watchlist.json` — hand-edited shows to follow (`plan_watch`): every new single episode, any resolution, no TMDB gate, outside the pilot quota; dropped after `WATCH_IDLE_S` (28d) without a new episode.
 - `tmdb.py` — TMDB lookup (needs `TMDB_READ_TOKEN` in `.env`; inert without it). Adds an
   approval when Deepseek rejects a popular, recent film it never heard of.
   `tmdb-replay.py` — read-only: caches TMDB facts for recent verdicts to calibrate it.
