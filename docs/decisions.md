@@ -392,3 +392,15 @@ something other than time since tracker upload; the other factors are unaffected
 Series pilot snapshot, same date (34 episodes, 8 dropped by nCore): 1.02 GB uploaded per
 GB-day vs 1.77 for films added since 2026-10-30 (age-matched ~2x worse), i.e. the pilot
 pays through torrent count, time and seedsize, not through upload per GB.
+
+## Series quota 3 -> 5 until the 151-torrent tier (2026-11-14)
+
+The quota was 3 because the 480 GB limit left too little room; the limit is now 600 GB.
+The count was 119 with 32 to go to the 3x tier (x1.20 on the score). At ~+2 net torrents
+a day that is ~15 days; at 5 episodes a day (~24% are dropped by nCore) about +4 net a
+day, ~8 days, while the extra ~2.4 GB/day still leaves the 120 GB headroom lasting ~10
+days, so the tier lands before the limit does. **Revert `SERIES_DAILY_MAX` to 3 once the
+count is about 160**: the margin keeps the daily unregistered removals from dropping the
+count back under 151, and the next tier is 251, where more episodes pay little. Untested:
+whether 5 eligible episodes a day exist; the quota binds at 3 every day, but the bot does
+not log how many were left out.

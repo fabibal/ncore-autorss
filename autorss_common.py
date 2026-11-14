@@ -43,7 +43,7 @@ TMDB_MIN_POPULARITY = 30.0  # TMDB popularity a film needs to be approved on TMD
 TMDB_MIN_VOTES = 20         # ...with at least this many votes (a 1-vote popularity spike is noise)
 TMDB_TV_MIN_POPULARITY = 30.0  # same for TV: popularity a show needs for its new episodes to be queued
 TMDB_TV_MIN_VOTES = 100        # TV votes accrue over seasons, so a real show clears this easily
-SERIES_DAILY_MAX = 3           # series pilot: episodes approved per rolling 24h (disk headroom is ~80 GB)
+SERIES_DAILY_MAX = 5           # series pilot: episodes approved per rolling 24h (temporarily 5 to reach 151 torrents; back to 3 at ~160)
 SERIES_MAX_BYTES = int(1.5e9)  # series pilot: single 720p episodes only; bigger = season pack / 4K-ish
 SERIES_SHOW_TTL_S = 2 * 24 * 3600  # re-ask TMDB about a show this often (popularity moves)
 WATCH_FILE = os.path.join(BASE_DIR, "watchlist.json")  # hand-edited: shows to follow regardless of popularity
