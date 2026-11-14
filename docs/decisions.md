@@ -12,12 +12,15 @@ ERTEK = up(interval) · avg(torrdate) · time · seedsize · skala_torrszam
 ```
 
 - `up(interval)` — bytes uploaded in the last 7 days / uninterrupted seed run.
-- `avg(torrdate)` — average age of running torrents. **Direction unverified:** nCore's text
-  says "átlag életkora" (average *age*), and in a product a larger age raises the score,
-  i.e. older would be better; this file used to say "newer = better" with no source. The
-  "fresh" choices below stand on `up(interval)` (young torrents upload ~14x more per day),
-  not on this term.
-- `time` — total seed time across all running torrents.
+- `avg(torrdate)` — "A futtatott torrentek atlag eletkora": average age of the running
+  torrents. The score is a product with no divisions, so **older raises it** (confirmed
+  2026-11-14 from nCore's published formula text; the bot cannot add old torrents anyway,
+  only new RSS items). Still unstated: whether "age" runs from the torrent's upload to
+  nCore or from when we started seeding it. The "fresh" choices below stand on
+  `up(interval)` (young torrents upload ~14x more per day), not on this term. Cost of the
+  young torrents measured in "What fresh torrents cost avg(torrdate)" below.
+- `time` — total seed time across all running torrents ("az osszes futtatott torrent
+  seedben toltott ideje").
 - `seedsize` — total bytes seeding.
 - `skala_torrszam` — torrent-count tier multiplier (step function: 0–10=1×,
   11–25=1.5×, 26–75=2×, 76–150=2.5×, 151–250=3×, 251+=3.5×).
@@ -194,7 +197,7 @@ Approve mainstream, high-demand films from the last 12 months (rolling cutoff in
 (Netflix/Amazon/etc.) is judged the same as a theatrical release, since it can
 generate just as much seeding demand. Reject classics, TV series/movies, low-budget
 direct-to-video, docs, sports, concerts, awards shows. This serves `up(interval)`
-(high demand; `avg(torrdate)`'s direction is unverified, see the top). Verdicts are cached per clean title (via
+(high demand; `avg(torrdate)` rewards age and is outweighed, see the top). Verdicts are cached per clean title (via
 `dedup_key`, case-insensitive) so quality variants -- including differently-cased
 scene releases of the same film -- reuse one call.
 
@@ -364,3 +367,28 @@ that still upload. The host had ~763 GB free, so `CATEGORY_HARD_GB` went to 600 
 `CATEGORY_CAP_GB` to 620 (keeps the 20 GB gap: the queue-hold cap must stay above the
 trim limit, or adding would stop before the trim ever fires). Older 480/500 figures in
 this file describe the situation at the time.
+
+## What fresh torrents cost avg(torrdate) (measured 2026-11-14)
+
+`avg(torrdate)` rewards age, and everything the bot adds is young, so the question was
+whether the series pilot (small episodes, age ~7 days) costs more than it earns. Estimate
+over the 119 live torrents vs the same set without the 26 series episodes, taking a
+torrent's age as time since its RSS item first appeared (assumption: tracker upload date):
+
+| factor | with / without series | effect |
+|---|---|---|
+| `avg(torrdate)` | 68.8 d / 86.3 d | x0.80 |
+| `up(interval)` (7d, Prometheus) | 984 / 847 GB | x1.16 |
+| `time` (sum of min(seeding_time, 7d)) | 18212 / 15222 h | x1.20 |
+| `seedsize` | 480 / 455 GB | x1.06 |
+| `skala_torrszam` | 119 / 93, both in 76-150 | x1.00 |
+
+Net **~x1.17**: the age loss is outweighed by the other three factors, before any tier
+step. Crossing 151 torrents is a further x1.20 (3x vs 2.5x), and episodes are the
+cheapest way there (22% of the torrents for 5% of the disk). So no change to the film
+filter or the series pilot on account of this term. The estimate moves only if "age" means
+something other than time since tracker upload; the other factors are unaffected.
+
+Series pilot snapshot, same date (34 episodes, 8 dropped by nCore): 1.02 GB uploaded per
+GB-day vs 1.77 for films added since 2026-10-30 (age-matched ~2x worse), i.e. the pilot
+pays through torrent count, time and seedsize, not through upload per GB.
