@@ -79,8 +79,8 @@ no deletion. `600–620`: trim completed 0-peer seeders toward 600. `> CATEGORY_
 ## Cron schedule
 
 ```cron
-*/5  * * * * /usr/bin/python3 /home/fbazsa/ncore-autorss/autorss.py            >> .../cron.log 2>&1
-0   */2 * * * /usr/bin/python3 /home/fbazsa/ncore-autorss/torrent-manager.py monitor >> .../torrent-manager-cron.log 2>&1
+*/5  * * * * /usr/bin/python3 <project>/autorss.py            >> .../cron.log 2>&1
+0   */2 * * * /usr/bin/python3 <project>/torrent-manager.py monitor >> .../torrent-manager-cron.log 2>&1
 ```
 
 `autorss.py` also invokes the manager twice per run: `ensure-space` after the decision
@@ -94,7 +94,7 @@ rotated weekly, 8 kept, gzip'd, by a user-level logrotate (no sudo on the host):
 
 ## Metrics (Prometheus textfile collector)
 
-Written to `/home/fbazsa/monitoring/textfile_collector/`, scraped via node_exporter.
+Written to `TEXTFILE_DIR` (the node_exporter textfile-collector directory), scraped via node_exporter.
 
 `autorss.prom` (torrent-manager `monitor`):
 `autorss_films_total{status=approved|rejected}`, `autorss_active_downloads`,
@@ -108,8 +108,8 @@ Written to `/home/fbazsa/monitoring/textfile_collector/`, scraped via node_expor
 
 ## Grafana dashboard
 
-- Dashboard "Server Overview", UID `00f835a2-f5ff-4efc-8a88-ddff8d738a3a`,
-  **"Auto-Film" row**. Prometheus datasource uid `cf7d75ft6sqo0e`.
+- Dashboard "Server Overview" (UID set as `DASH_UID` in `torrent-manager.py`),
+  **"Auto-Film" row**, backed by a Prometheus datasource.
 - Panels: 5 stats (Deepseek döntések, Aktív letöltések + seedelés, 0 peer torrentek,
   Törlések, Disk usage), a **Daily Upload / Download (GB)** bar chart
   (`increase(...[1d])/1e9`, 1d step, w=12 at row 2 x=0; green Upload + blue
@@ -129,20 +129,16 @@ Written to `/home/fbazsa/monitoring/textfile_collector/`, scraped via node_expor
 - Same Basic-auth GET/POST pattern is used to add/edit panels. Hash-gated so an
   unchanged panel isn't re-pushed.
 
-## GitHub repo
+## Repository
 
-- Remote: `git@github.com:fabibal/ncore-autorss.git`, branch `main`.
-- Local git config: `user.name=fabibal`, `user.email=fbazsa@gmail.com` (no global
-  `~/.gitconfig`). SSH via `~/.ssh/github_hl_copy_bot`, routed by `~/.ssh/config`
-  (same setup as the other `fabibal/*` repos).
-- `.gitignore` excludes secrets + machine-local state: `.env`, `.env.*` (keeps
-  `.env.example`), `state.json`, `manager-state.json`, `*.log`, the three lock
-  files, `__pycache__/`.
+- `.gitignore` excludes secrets and machine-local state: `.env`, `.env.*` (keeps
+  `.env.example`), `state.json`, `manager-state.json`, `tmdb-cache.json`, `*.log`, the
+  three lock files, `__pycache__/`.
 
 ## Environment / secrets
 
 - `PROJECT_ENV` = `./​.env` (gitignored): `NCORE_RSS_KEY`, `GRAFANA_URL`,
   `GRAFANA_USER`, `GRAFANA_PASS`. Template: `.env.example`.
-- `TRADING_ENV` = `/home/fbazsa/trading_agent/.env`: the `DEEPSEEK` API key (read
+- `TRADING_ENV` (a separate `.env`, path set in `autorss_common.py`): the `DEEPSEEK` API key (read
   from there, not from this project's `.env`).
 - `env_value` prefers an exact var-name match, falling back to substring.
